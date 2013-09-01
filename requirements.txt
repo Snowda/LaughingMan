@@ -1,0 +1,5 @@
+Dependencies needed for the program to run:
+
+OpenCV and its dependencies
+Python 2.7
+NumPy
