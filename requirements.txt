@@ -1,5 +1,2 @@
-Dependencies needed for the program to run:
-
-OpenCV and its dependencies
-Python 2.7
-NumPy
+opencv-python==4.2.0.32 
+numpy==1.17.4
