@@ -74,7 +74,7 @@ def fix_operator_space(lint_file, contents, error=list()):
 
     for key in reversed(sorted(error_list)):
         stripped = contents[key]
-        print stripped
+        print(stripped)
         if "=" in contents[key]:
             stripped = re.sub('=', ' = ', stripped)
             contents[key] = contents[key].replace(contents[key], stripped)
@@ -97,7 +97,7 @@ def find_dangerous_default_value(lint_file, error_dict=dict()):
             re2 = '(\\d+)' # Integer Number 1
             rg = re.compile(re1+re2, re.IGNORECASE|re.DOTALL)
             m = rg.search(line)
-            print line
+            print(line)
             if m:
                 int1 = m.group(1)
 
@@ -126,7 +126,7 @@ def fix_dangerous_default_value(lint_file, contents, error_dict=dict()):
         if result == "None":
             result = re.search(r'\((.*?)="None"', contents[key])
         var_name = result.group(1)
-        print str(var_name).strip()+" "+str(key)
+        print(str(var_name).strip()+" "+str(key))
         if errors[key] == 'dict':
             extraline = 'if '+str(var_name)+' is "None": '+str(var_name)+' = dict()'
         else:
@@ -164,7 +164,7 @@ def fix_comma_space(lint_file, contents, error=list()):
 
     for key in reversed(sorted(error_list)):
         stripped = contents[key]
-        print stripped
+        print(stripped)
         if "," in contents[key]:
             stripped = re.sub(',', ', ', stripped)
             contents[key] = contents[key].replace(contents[key], stripped)
@@ -268,9 +268,9 @@ def apply_fixes(lint_file, modified_file):
     contents = fix_operator_space(lint_data, contents)
     contents = fix_unused_import(lint_data, contents)
     contents = fix_missing_docstring(lint_data, contents)
-    print "attempting dangerous defaults"
+    print("attempting dangerous defaults")
     contents = fix_dangerous_default_value(lint_data, contents)
-    print "dangerous defaults done"
+    print("dangerous defaults done")
 
     #contents = fix_line_length_errors(lint_data, contents)
     #contents = fix_variable_names(lint_data, contents)
