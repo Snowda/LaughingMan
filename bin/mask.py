@@ -1,39 +1,45 @@
+""""""
 #!/usr/bin/env python
 
-import numpy as np
-import cv2, getopt, sys
+import sys
+import getopt
+from cv2 import CascadeClassifier, CASCADE_SCALE_IMAGE, COLOR_BGR2GRAY, cvtColor, destroyAllWindows
+from cv2 import equalizeHist, imread, imshow, rectangle, resize, waitKey
 
 # local modules
 from video import create_capture
 from common import clock, draw_str
 
-import re
 
 def detect(img, cascade):
-    rects = cascade.detectMultiScale(img, scaleFactor=1.3, minNeighbors=4, minSize=(30, 30), flags = cv2.CASCADE_SCALE_IMAGE)
+    """"""
+    rects = cascade.detectMultiScale(img, scaleFactor=1.3, minNeighbors=4, minSize=(30, 30),
+                                     flags=CASCADE_SCALE_IMAGE)
     if len(rects) == 0:
         return []
-    rects[:,2:] += rects[:,:2]
+    rects[:, 2:] += rects[:, :2]
     return rects
 
 def draw_rects(img, rects, color):
+    """"""
     for x1, y1, x2, y2 in rects:
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+        rectangle(img, (x1, y1), (x2, y2), color, 2)
 
 def face_mask(image, mask, shape):
+    """"""
     for x1, y1, x2, y2 in shape:
-        x_size = x2-x1
-        y_size = y2-y1
-        
+        x_size = x2 - x1
+        y_size = y2 - y1
+
         if type(shape) != list:
-            scaled_mask = cv2.resize(mask, (x_size, y_size))
+            scaled_mask = resize(mask, (x_size, y_size))
         else:
             scaled_mask = mask
 
-        #image[y1:y1+scaled_mask.shape[0], x1:x1+scaled_mask.shape[1]] = scaled_mask
+        # image[y1:y1+scaled_mask.shape[0], x1:x1+scaled_mask.shape[1]] = scaled_mask
 
-        for c in range(0,3):
-            image[y1:y1+scaled_mask.shape[0], x1:x1+scaled_mask.shape[1], c] = scaled_mask[:,:,c] * (scaled_mask[:,:,3]/255.0) + image[y1:y1+scaled_mask.shape[0], x1:x1+scaled_mask.shape[1], c] * (1.0 - scaled_mask[:,:,3]/255.0)
+        for c in range(3):
+            image[y1:y1+scaled_mask.shape[0], x1:x1+scaled_mask.shape[1], c] = scaled_mask[:, :, c] * (scaled_mask[:, :, 3]/255.0) + image[y1:y1+scaled_mask.shape[0], x1:x1+scaled_mask.shape[1], c] * (1.0 - scaled_mask[:,:,3]/255.0)
 
 def display_fps(image, this_time):
     """"""
@@ -50,7 +56,7 @@ def draw_eyes(image, gray, rects, nested):
         draw_rects(vis_roi, subrects, (255, 0, 0))
 
 def main():
-
+    """"""
     args, video_src = getopt.getopt(sys.argv[1:], '', ['cascade=', 'nested-cascade='])
     try:
         video_src = video_src[0]
@@ -58,27 +64,27 @@ def main():
         video_src = 0
     args = dict(args)
     cascade_fn = args.get('--cascade', "../../data/haarcascades/haarcascade_frontalface_alt.xml")
-    nested_fn  = args.get('--nested-cascade', "../../data/haarcascades/haarcascade_eye.xml")
+    nested_fn = args.get('--nested-cascade', "../../data/haarcascades/haarcascade_eye.xml")
 
-    cascade = cv2.CascadeClassifier(cascade_fn)
-    nested = cv2.CascadeClassifier(nested_fn)
+    cascade = CascadeClassifier(cascade_fn)
+    nested = CascadeClassifier(nested_fn)
 
     cam = create_capture(video_src, fallback='synth:bg=../cpp/lena.jpg:noise=0.05')
 
     old_rects = []
 
-    s_img = cv2.imread("laughing_man.png", -1) #GITS_laughingman.svg") # laugh.png
-    x_offset=y_offset=0
+    s_img = imread("laughing_man.png", -1)  # GITS_laughingman.svg") # laugh.png
+    x_offset = y_offset = 0
 
     time_delay = clock()
 
     while True:
-        ret, img = cam.read()
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
+        _, img = cam.read()
+        gray = cvtColor(img, COLOR_BGR2GRAY)
+        gray = equalizeHist(gray)
 
         rects = detect(gray, cascade)
-        
+
         if type(rects) == list:
             rects = old_rects
         else:
@@ -103,11 +109,11 @@ def main():
         face_mask(vis, s_img, rects)
         time_delay = display_fps(vis, time_delay)
 
-        cv2.imshow('Laughing Man Mask', vis)
+        imshow('Laughing Man Mask', vis)
 
-        if 0xFF & cv2.waitKey(5) == 27:
+        if 0xFF & waitKey(5) == 27:
             break
-    cv2.destroyAllWindows()
+    destroyAllWindows()
 
 if __name__ == '__main__':
     main()
