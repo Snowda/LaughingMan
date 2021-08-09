@@ -5,12 +5,17 @@
 from re import sub
 from time import time
 from pathlib import Path
+from io import BytesIO
 import numpy as np
+from PIL import Image
+import pyvips
 from cv2 import CascadeClassifier, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH
-from cv2 import CASCADE_SCALE_IMAGE, destroyAllWindows, FONT_HERSHEY_PLAIN
-from cv2 import getTickCount, getTickFrequency, getWindowProperty, imread
-from cv2 import imshow, imwrite, LINE_AA, putText, resize, waitKey
+from cv2 import CASCADE_SCALE_IMAGE, COLOR_RGBA2BGRA, cvtColor, destroyAllWindows
+from cv2 import FONT_HERSHEY_PLAIN, getTickCount, getTickFrequency, getWindowProperty
+from cv2 import imread, imshow, imwrite, LINE_AA, putText, resize, waitKey
 from cv2 import WND_PROP_VISIBLE, VideoCapture
+
+WINDOW_TITLE = 'Laughing Man Mask'
 
 def draw_str(dst, string_value, x_postion=20, y_position=20):
     """Draw a string on the detination image"""
@@ -23,34 +28,24 @@ def clock():
     """"""
     return getTickCount() / getTickFrequency()
 
-def detect(img, cascade):
-    """"""
-    rects = cascade.detectMultiScale(img, scaleFactor=1.3, minNeighbors=4,
-                                     minSize=(30, 30), flags=CASCADE_SCALE_IMAGE)
-    if len(rects) == 0:
-        return []
-    rects[:, 2:] += rects[:, :2]
-    return rects
-
 def face_mask(image, mask, shape):
     """"""
-    for left_bound, y1, x2, y2 in shape:
+    for left_bound, lower_bound, right_bound, upper_bound in shape:
         left_bound = int(left_bound)
-        y1 = int(y1)
-        x2 = int(x2)
-        y2 = int(y2)
-        x_size = int(x2 - left_bound)
-        y_size = int(y2 - y1)
+        lower_bound = int(lower_bound)
+        right_bound = int(right_bound)
+        upper_bound = int(upper_bound)
+        x_size = int(right_bound - left_bound)
+        y_size = int(upper_bound - lower_bound)
 
         if isinstance(shape, list):
             scaled_mask = mask
         else:
             scaled_mask = resize(mask, (x_size, y_size))
 
-        # image[y1:y1+scaled_mask.shape[0], left_bound:left_bound+scaled_mask.shape[1]] = scaled_mask
         for color in range(3):
-            image[y1:y1 + scaled_mask.shape[0], left_bound:left_bound + scaled_mask.shape[1],
-                  color] = scaled_mask[:, :, color] * (scaled_mask[:, :, 3]/255.0) + image[y1:y1 + scaled_mask.shape[0],
+            image[lower_bound:lower_bound + scaled_mask.shape[0], left_bound:left_bound + scaled_mask.shape[1],
+                  color] = scaled_mask[:, :, color] * (scaled_mask[:, :, 3]/255.0) + image[lower_bound:lower_bound + scaled_mask.shape[0],
                                                        left_bound:left_bound+scaled_mask.shape[1],
                                                        color] * (1.0 - scaled_mask[:, :, 3]/255.0)
 
@@ -59,20 +54,11 @@ def display_fps(image, this_time):
     frame_time = int(1/(clock() - this_time))
     draw_str(image, f"{frame_time} FPS")
     return clock()
-def anorm2(input_value):
-    """"""
-    return (input_value*input_value).sum(-1)
 
-def anorm(input_value):
+def main():
     """"""
-    return np.sqrt(anorm2(input_value))
-
-def create_capture(source=0):
-    """"""
-    source = str(source).strip()
-
     # Win32: handle drive letter ('c:', ...)
-    source = sub(r'(^|=)([a-zA-Z]):([/\\a-zA-Z0-9])', r'\1?disk\2?\3', source)
+    source = sub(r'(^|=)([a-zA-Z]):([/\\a-zA-Z0-9])', r'\1?disk\2?\3', "0")
     chunks = source.split(':')
     chunks = [sub(r'\?disk([a-zA-Z])\?', r'\1:', s) for s in chunks]
 
@@ -83,33 +69,29 @@ def create_capture(source=0):
         pass
     params = dict(s.split('=') for s in chunks[1:])
 
-    cap = None
-    cap = VideoCapture(source)
+    cam = VideoCapture(source)
     if 'size' in params:
-        width, h = map(int, params['size'].split('x'))
-        cap.set(CAP_PROP_FRAME_WIDTH, width)
-        cap.set(CAP_PROP_FRAME_HEIGHT, h)
+        width, height = map(int, params['size'].split('x'))
+        cam.set(CAP_PROP_FRAME_WIDTH, width)
+        cam.set(CAP_PROP_FRAME_HEIGHT, height)
 
-    if cap is None or not cap.isOpened():
-        print('Warning: unable to open video source: ', source)
-    return cap
-
-def main():
-    """"""
-    #cascade_fn = args.get('--cascade', "../../data/haarcascades/haarcascade_frontalface_alt.xml")
-    #nested_fn = args.get('--nested-cascade', "../../data/haarcascades/haarcascade_eye.xml")
+    if cam is None or not cam.isOpened():
+        print(f"Warning: unable to open {source}")
+        return
 
     # https://github.com/opencv/opencv/blob/master/data/haarcascades/haarcascade_frontalface_alt.xml
     # Try data/haarcascades/haarcascade_eye.xml also
     cascade = CascadeClassifier("haarcascade_frontalface_alt.xml")
-    cam = create_capture(0)
 
     old_rects = []
 
-    s_img = imread("laughing.png", -1)  # GITS_laughingman.svg")
-    time_delay = clock()
+    image = pyvips.Image.new_from_file("laughing-man.svg", dpi=300)
 
-    window_title = 'Laughing Man Mask'
+    pil_img = Image.open(BytesIO(png)).convert('RGBA')
+    cv_img = cvtColor(np.array(pil_img), COLOR_RGBA2BGRA)
+    s_img = imread(cv_img, -1)
+    #s_img = imread("laughing-man.svg", -1)
+    time_delay = clock()
 
     while True:
         _, img = cam.read()
@@ -124,14 +106,14 @@ def main():
         if isinstance(rects, list):
             rects = old_rects
         elif not isinstance(old_rects, list):
-            for left_bound, y1, x2, y2 in rects:
-                x_size = x2 - left_bound
-                y_size = y2-y1
+            for left_bound, lower_bound, right_bound, upper_bound in rects:
+                x_size = right_bound - left_bound
+                y_size = upper_bound-lower_bound
                 rect_pyth = (y_size*y_size)+(x_size*x_size)
 
-            for left_bound, y1, x2, y2 in old_rects:
-                x_size = x2-left_bound
-                y_size = y2-y1
+            for left_bound, lower_bound, right_bound, upper_bound in old_rects:
+                x_size = right_bound-left_bound
+                y_size = upper_bound-lower_bound
                 old_pyth = (y_size*y_size)+(x_size*x_size)
 
             if old_pyth > rect_pyth:
@@ -142,31 +124,26 @@ def main():
             old_rects = rects
 
         vis = img.copy()
-
         face_mask(vis, s_img, rects)
         time_delay = display_fps(vis, time_delay)
+        imshow(WINDOW_TITLE, vis)
 
-        imshow(window_title, vis)
-
-        ch = waitKey(1)
-        if getWindowProperty(window_title, WND_PROP_VISIBLE) < 1:
+        character = waitKey(1)
+        if getWindowProperty(WINDOW_TITLE, WND_PROP_VISIBLE) < 1:
             break
 
         # Quiting key bindings
-        if ch in [27, 1048603]:  # ESC key to abort, close window
-            break
-        if ch in [32]:  # Space is also a commonly used value
+        if character in [27, 1048603, 32]:  # ESC or Space key to close window
             break
 
         # Alternatively, pressing S takes a screenshot
-        if ch in [115]:
+        if character in [115]:
             screenshot_directory = Path.cwd() / "screenshots"
 
             if not screenshot_directory.exists():
                 screenshot_directory.mkdir(parents=True, exist_ok=True)
             unix_value = int(time())
-            file_name = str(screenshot_directory / f"laugh_{unix_value}.bmp")
-            imwrite(file_name, img)
+            imwrite(str(screenshot_directory / f"laugh_{unix_value}.bmp"), img)
             print(f"screenshots/laugh_{unix_value}.bmp saved.")
 
     destroyAllWindows()
