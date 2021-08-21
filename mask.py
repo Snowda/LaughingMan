@@ -87,7 +87,7 @@ def main():
 
     image = pyvips.Image.new_from_file("laughing-man.svg", dpi=300)
 
-    pil_img = Image.open(BytesIO(png)).convert('RGBA')
+    pil_img = Image.open(BytesIO(image)).convert('RGBA')
     cv_img = cvtColor(np.array(pil_img), COLOR_RGBA2BGRA)
     s_img = imread(cv_img, -1)
     #s_img = imread("laughing-man.svg", -1)
