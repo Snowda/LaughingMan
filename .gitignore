@@ -33,3 +33,7 @@ nosetests.xml
 .mr.developer.cfg
 .project
 .pydevproject
+.pylintrc
+haarcascade_frontalface_alt.xml
+laughing-man.svg
+laughing.png
