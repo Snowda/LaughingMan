@@ -1,5 +1,5 @@
 CairoSVG==2.5.2
-numpy==1.21.2
+numpy==1.21.3
 opencv-python==4.5.3.56
 pathlib==1.0.1
 Pillow==8.4.0
