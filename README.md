@@ -10,7 +10,7 @@
 
 ## Installation
 
-1. Requires Python 3.7+
+1. Requires Python 3.8+
 1. Requires a LaughingMan logo with alpha transparency which was downloaded from wikipedia
 
 ## Usage
@@ -22,6 +22,8 @@ python3 mask.py
 ## Report Issues
 
 ## Contribute
+
+Submit a Pull Request!
 
 ## License
 
