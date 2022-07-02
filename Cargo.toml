@@ -1,0 +1,26 @@
+[package]
+
+name = "laughing-man"
+version = "0.0.2"
+authors = ["Conor Forde"]
+edition = '2018'
+
+repository = "https://www.github.com/Snowda/LaughingMan"
+
+description = "Laughing Man"
+keywords = ["laughing", "gits", "recognition"]
+
+[[bin]]
+name = "test"
+path = "src/laugh.rs"
+
+[features]
+default = ["std"]
+std = [ "serde" ]
+
+[dependencies]
+futures = "0.3.19"
+reqwest = { version = "0.11.4", features = ["blocking"] }
+tokio = { version = "1.9.0", features = ["full"] }
+time = "0.3.1"
+chrono = "0.4.19"
