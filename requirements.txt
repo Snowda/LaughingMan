@@ -3,3 +3,4 @@ numpy==1.23.0
 opencv-python==4.6.0.66
 pathlib==1.0.1
 Pillow==9.1.1
+pyvips==2.2.1
