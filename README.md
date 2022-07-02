@@ -21,9 +21,11 @@ python3 mask.py
 
 ## Report Issues
 
+[Submit an issue](https://github.com/Snowda/LaughingMan/issues)
+
 ## Contribute
 
-Submit a Pull Request!
+[Submit a Pull Request!](https://github.com/Snowda/LaughingMan/pulls)
 
 ## License
 
