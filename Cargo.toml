@@ -1,36 +1,118 @@
 [package]
-
 name = "laughing-man"
-version = "0.0.2"
+version = "0.1.0"
 authors = ["Conor Forde"]
-edition = '2021'
+edition = "2024"
+rust-version = "1.96"
+repository = "https://github.com/Snowda/LaughingMan"
+description = "Overlays the Ghost in the Shell 'Laughing Man' logo on faces in webcam/video, on the GPU."
+keywords = ["laughing-man", "gits", "face-detection", "msdf", "vulkan"]
+license = "MIT"
+default-run = "laughing-man"
 
-repository = "https://www.github.com/Snowda/LaughingMan"
-
-description = "Laughing Man"
-keywords = ["laughing", "gits", "recognition"]
-
-[[bin]]
-name = "test"
-path = "src/laugh.rs"
-
-[features]
-default = ["std"]
-std = [ "serde" ]
+# Dependencies are added per phase (see PLAN.md); Phase 0 is CLI + webcam capture only. Later
+# phases add ort (detection), ash/winit/spirv-reader (GPU presenter), and fdsm/usvg (the MSDF
+# bake, which becomes the `laughing-bake` bin).
 
 [dependencies]
-futures = "0.3.19"
+# CLI parsing.
+clap = { version = "4", features = ["derive"] }
+# Webcam capture via the native backend (Media Foundation on Windows). `decoding` converts
+# compressed camera formats (MJPEG) to RGB on the CPU.
+nokhwa = { version = "0.10", features = ["input-native", "decoding"] }
+# Error propagation at the binary's top level.
+anyhow = "1"
 
-# HTTP Requests
-reqwest = { version = "0.11.4", features = ["blocking"] }
+# GPU shaders authored in Aspire's Rust-syntax DSL, lowered to SPIR-V at macro-expansion. `dsl` is
+# the proc-macro; `aspire` carries the `ShaderModule` handle the macro emits; `spirv-reader`
+# reflects the emitted SPIR-V (entry points, descriptor bindings, fragment outputs) to drive
+# Vulkan pipeline/descriptor creation. Path deps — Aspire is checked out beside this repo.
+dsl = { path = "../Aspire/crates/dsl" }
+aspire = { path = "../Aspire/crates/aspire" }
+spirv-reader = { path = "../Aspire/crates/spirv-reader", features = ["ash"] }
 
-# JSON parsing
-serde = { version = "1.0.127", optional = true, features = ["derive"] }
-serde_json = "1.0.66"
+# Vulkan presenter: ash is the Vulkan binding; ash-window creates the surface from the winit
+# window (raw-window-handle bridges the two); winit owns the window + event loop.
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+winit = "0.30"
+# PNG decode of baked MTSDF atlases loaded at runtime (and the bake's PNG output under `bake`).
+image = "0.25"
+# Video-file input: wraps a standalone ffmpeg binary (auto-downloaded if absent) and decodes to raw
+# RGB frames over a pipe. No C toolchain / vendored libs — just a subprocess.
+ffmpeg-sidecar = "2.5"
+# Audio playback of the input video's track (decodes the mp4/AAC audio via symphonia). Degrades
+# gracefully to silent video when no output device or audio stream is available.
+rodio = { version = "0.22", default-features = false, features = ["playback", "symphonia-isomp4", "symphonia-aac"] }
 
-# Async communication
-tokio = { version = "1.9.0", features = ["full"] }
+# GPU render verification (feature `integration_tests` only): Aspire's headless Vulkan runner, used
+# to render a shader offscreen and read the pixels back. Skips cleanly when no Vulkan device exists
+# (`Gpu::new` → None). Optional so the default build never pulls ash/Vulkan.
+vk-run = { path = "../Aspire/crates/vk-run", optional = true }
 
-# Time management
-time = "0.3.1"
-chrono = "0.4.19"
+# MSDF bake toolchain (feature `bake` only): fdsm generates the multi-channel SDF, usvg parses the
+# logo SVG into fillable paths, nalgebra supplies the fit transform, image writes the PNG atlas.
+# Optional + feature-gated so the runtime app (presenter) never pulls this heavier toolchain.
+fdsm = { version = "0.8", optional = true }
+usvg = { version = "0.47", optional = true }
+nalgebra = { version = "0.34", optional = true }
+# Independent SVG rasterizer (usvg + tiny-skia), used by the bake fidelity test to compare the MSDF
+# output against a ground-truth render of the source SVG. Version-aligned with `usvg`.
+resvg = { version = "0.47", optional = true }
+# Data-parallel MSDF generation: the per-texel distance field is embarrassingly parallel.
+rayon = { version = "1", optional = true }
+
+# SCRFD ONNX inference (feature `detect` only): the ort ONNX Runtime wrapper. Optional so the
+# runtime app / coverage build never pulls ONNX Runtime. `load-dynamic` loads onnxruntime.dll at
+# runtime rather than static-linking a prebuilt ORT (which mismatches the local MSVC STL, and is the
+# recommended production setup: ship the DLL alongside the app).
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["load-dynamic"] }
+
+[features]
+# Compiles the GPU render tests (offscreen render + readback via vk-run). Off by default so a plain
+# `cargo test` and the coverage build stay light and need no Vulkan device.
+integration_tests = ["dep:vk-run"]
+# Compiles the MSDF bake toolchain (the `laughing-bake` bin + `mask` module). Off by default so the
+# runtime app build never pulls fdsm/usvg.
+bake = ["dep:fdsm", "dep:usvg", "dep:nalgebra", "dep:resvg", "dep:rayon"]
+# Compiles the SCRFD ONNX session (the `detect::session` module). Off by default so the runtime app
+# and coverage build don't pull ONNX Runtime. The pure decode + NMS are always compiled and tested.
+detect = ["dep:ort"]
+
+# The offline MSDF bake tool. Guarded by the `bake` feature so it isn't built (and its deps aren't
+# pulled) for the runtime app.
+[[bin]]
+name = "laughing-bake"
+required-features = ["bake"]
+
+[profile.coverage]
+inherits = "dev"
+opt-level = 0
+debug = false
+
+[profile.coverage.package."*"]
+opt-level = 0
+debug = false
+
+# Sibling-project lint conventions (mirrors Aspire's vk-run): unsafe denied crate-wide; a strict
+# clippy set caught early rather than retrofitted.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+float_arithmetic = "allow"
+float_cmp = "deny"
+float_cmp_const = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+wildcard_imports = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "warn"
+as_conversions = "warn"
+str_to_string = "deny"
+needless_return = "allow"
+must_use_candidate = "allow"
+disallowed_types = "deny"
