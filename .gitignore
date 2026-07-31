@@ -18,9 +18,6 @@ develop-eggs
 lib
 lib64
 
-# Installer logs
-pip-log.txt
-
 # Unit test / coverage reports
 .coverage
 .tox
@@ -34,6 +31,9 @@ nosetests.xml
 .project
 .pydevproject
 .pylintrc
-haarcascade_frontalface_alt.xml
-laughing-man.svg
-laughing.png
+
+# Asset Data
+*.mp4
+*.onnx
+/target
+*.png
