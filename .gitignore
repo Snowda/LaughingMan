@@ -37,3 +37,4 @@ nosetests.xml
 *.onnx
 /target
 *.png
+*.svg
