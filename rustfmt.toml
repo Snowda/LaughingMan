@@ -1,0 +1,14 @@
+hard_tabs = true
+# Visual width of a tab in spaces (editor/viewer preference); rustfmt uses tabs for indentation when hard_tabs=true
+tab_spaces = 4
+
+# Import layout. `imports_granularity`/`group_imports` are nightly-only rustfmt options, so
+# formatting must run under nightly (`cargo +nightly fmt`). Module granularity collapses the
+# one-use-per-item verbosity into one flat braced group per module path (no nested `{}`);
+# StdExternalCrate keeps the std / external / internal grouping the codebase already follows.
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+
+# 120 matches the house convention (CLAUDE.md: "inline if under 120 characters"); rustfmt's 100
+# default would reflow working code, not just imports.
+max_width = 120
