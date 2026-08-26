@@ -55,11 +55,11 @@ vk-run = { path = "../Aspire/crates/vk-run", optional = true }
 # logo SVG into fillable paths, nalgebra supplies the fit transform, image writes the PNG atlas.
 # Optional + feature-gated so the runtime app (presenter) never pulls this heavier toolchain.
 fdsm = { version = "0.8", optional = true }
-usvg = { version = "0.47", optional = true }
+usvg = { version = "0.48", optional = true }
 nalgebra = { version = "0.34", optional = true }
 # Independent SVG rasterizer (usvg + tiny-skia), used by the bake fidelity test to compare the MSDF
 # output against a ground-truth render of the source SVG. Version-aligned with `usvg`.
-resvg = { version = "0.47", optional = true }
+resvg = { version = "0.48", optional = true }
 # Data-parallel MSDF generation: the per-texel distance field is embarrassingly parallel.
 rayon = { version = "1", optional = true }
 
