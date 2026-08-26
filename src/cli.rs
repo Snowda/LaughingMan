@@ -52,10 +52,10 @@ pub struct Cli {
     #[arg(long)]
     pub logo_text: Option<PathBuf>,
 
-    /// Radius (0..1 of the mask) of the white face disc painted behind the blue logo — the "white
-    /// background" an all-blue logo SVG can't supply. 0 disables it (blue-only).
-    #[arg(long, default_value_t = 0.46)]
-    pub face_fill: f32,
+    /// Baked front-layer MTSDF PNG (features + cap). Its silhouette occludes the rotating text ring
+    /// so the hat reads as in front of it. Only its alpha is used, at load; not uploaded.
+    #[arg(long)]
+    pub logo_front: Option<PathBuf>,
 
     /// Number of frames to sample when measuring the capture rate.
     #[arg(long, default_value_t = 120)]

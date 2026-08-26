@@ -30,6 +30,41 @@ pub fn shape_from_svg(svg: &[u8]) -> anyhow::Result<Shape<Contour>> {
     Ok(Shape { contours })
 }
 
+/// Parses `svg` into one fdsm shape per filled `<path>`, each paired with its own fill rule. Baking
+/// these as separate layers and unioning the results reproduces SVG fill semantics — overlapping
+/// paths combine instead of XOR-ing into holes — while each path keeps its own interior holes.
+pub fn shapes_from_svg(svg: &[u8]) -> anyhow::Result<Vec<(Shape<Contour>, Fill)>> {
+    let tree = Tree::from_data(svg, &Options::default()).context("parsing SVG")?;
+    let mut layers: Vec<(Shape<Contour>, Fill)> = Vec::new();
+    collect_layers(tree.root(), &mut layers);
+    layers.retain(|(shape, _)| !shape.contours.is_empty());
+    if layers.is_empty() {
+        return Err(anyhow!("SVG has no filled path (convert text/strokes to filled paths?)"));
+    }
+    Ok(layers)
+}
+
+// Walks a group, emitting one (shape, fill) per filled path (absolute transform applied).
+fn collect_layers(group: &Group, out: &mut Vec<(Shape<Contour>, Fill)>) {
+    for node in group.children() {
+        match node {
+            Node::Group(child) => collect_layers(child, out),
+            Node::Path(path) => {
+                if let Some(fill) = path.fill() {
+                    let mut contours = Vec::new();
+                    append_path(path, &mut contours);
+                    let rule = match fill.rule() {
+                        usvg::FillRule::EvenOdd => Fill::EvenOdd,
+                        usvg::FillRule::NonZero => Fill::Nonzero,
+                    };
+                    out.push((Shape { contours }, rule));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The fill rule of the first filled path in `svg` — the rule the bake must sign by so holes read
 /// correctly (the Laughing Man logo is `fill-rule:evenodd`). Defaults to nonzero when unparseable or
 /// unfilled.

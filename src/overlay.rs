@@ -2,8 +2,9 @@
 //!
 //! [`face_instance`] turns a [`Detection`] into the GPU `FaceInstance` the compositor shader loops
 //! over: the face center + half-size (frame pixels), the roll and ring-phase rotations precomputed
-//! as cos/sin (so the shader needs no trig), the screen-space AA range, and a track fade. Rotations
-//! come from the eye line (landmarks 0/1). [`composite_pixel`] is the exact per-pixel math the
+//! as cos/sin (so the shader needs no trig), the screen-space AA range, and a track fade. The overlay
+//! is kept level with the camera (identity roll), so it no longer tilts with the head; the ring phase
+//! still spins the text layer. [`composite_pixel`] is the exact per-pixel math the
 //! fragment shader performs, kept here so the compositing logic is verified analytically on the CPU
 //! (the shader is a faithful DSL translation, reflection-checked in `shaders`).
 #![allow(clippy::as_conversions)]
@@ -52,9 +53,9 @@ impl FaceInstance {
 }
 
 /// Builds the mask instance for `det`: center = box center; half-size = the larger box dimension
-/// scaled by `cover_scale`; roll = the eye-line angle (right eye − left eye); the ring phase spins
-/// the text layer; `screen_px_range` is the MSDF AA range at this on-screen size (`px_range` texels
-/// spread over the mask's screen extent), floored at 1.
+/// scaled by `cover_scale`; the overlay is kept level with the camera (identity roll, so it does not
+/// tilt with the head); the ring phase spins the text layer; `screen_px_range` is the MSDF AA range at
+/// this on-screen size (`px_range` texels spread over the mask's screen extent), floored at 1.
 #[must_use]
 pub fn face_instance(
     det: &Detection,
@@ -66,17 +67,15 @@ pub fn face_instance(
 ) -> FaceInstance {
     let cx = (det.bbox.x1 + det.bbox.x2) * 0.5;
     let cy = (det.bbox.y1 + det.bbox.y2) * 0.5;
-    let (lex, ley) = det.landmarks[0];
-    let (rex, rey) = det.landmarks[1];
-    let roll = (rey - ley).atan2(rex - lex);
     let box_size = det.bbox.width().max(det.bbox.height());
     let half_size = box_size * 0.5 * cover_scale;
     let screen_px_range = (2.0 * half_size / atlas_size * px_range).max(1.0);
     FaceInstance {
         center: [cx, cy],
         half_size,
-        roll_cos: roll.cos(),
-        roll_sin: roll.sin(),
+        // The overlay stays level with the camera, not the head — no roll from the eye line.
+        roll_cos: 1.0,
+        roll_sin: 0.0,
         phase_cos: ring_phase.cos(),
         phase_sin: ring_phase.sin(),
         screen_px_range,
@@ -130,22 +129,20 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-/// Mask-local radius of the white face disc (the "white background" the all-blue logo SVG can't
-/// supply). Must match the constant in the compositor shader.
-pub const FACE_DISC_RADIUS: f32 = 0.46;
-
 /// The compositor fragment's per-pixel math, on the CPU. For each face: rotate the pixel offset by
-/// `-roll` into mask-local space, and if it lands within the mask, paint the `white` face disc, then
-/// sample the static + (ring-phase-rotated) text MSDF layers, take the max of their medians as the
-/// coverage, and blend `blue` (the logo detail) on top. `sample_static`/`sample_text` return the
-/// MSDF texel `(r,g,b)` at a mask-local `(u, v)`.
+/// `-roll` into mask-local space, and if it lands within the mask, paint the `white` face (both alpha
+/// levels), draw the ring-phase-rotated text `blue` gated to the band level, then the static `blue`
+/// linework on top. The static alpha is 3-level: ~1.0 band (text shows), ~0.5 occluder (front layer,
+/// text hidden), 0 outside; the text is rotated about `pivot` (the logo's circle centre in mask UV).
+/// `sample_static` returns the static texel `(r,g,b,a)`; `sample_text` the text MSDF `(r,g,b)`.
 pub fn composite_pixel(
     video: [f32; 3],
     faces: &[FaceInstance],
     px: (f32, f32),
     white: [f32; 3],
     blue: [f32; 3],
-    sample_static: impl Fn(f32, f32) -> [f32; 3],
+    pivot: (f32, f32),
+    sample_static: impl Fn(f32, f32) -> [f32; 4],
     sample_text: impl Fn(f32, f32) -> [f32; 3],
 ) -> [f32; 3] {
     let mut color = video;
@@ -158,22 +155,25 @@ pub fn composite_pixel(
         let mu = lx / (2.0 * face.half_size) + 0.5;
         let mv = ly / (2.0 * face.half_size) + 0.5;
         if (0.0..=1.0).contains(&mu) && (0.0..=1.0).contains(&mv) {
-            // White face background disc, AA'd by the signed pixel distance to its edge.
-            let (hx, hy) = (mu - 0.5, mv - 0.5);
-            let radius = (hx * hx + hy * hy).sqrt();
-            let disc = ((FACE_DISC_RADIUS - radius) * 2.0 * face.half_size + 0.5).clamp(0.0, 1.0)
-                * face.fade;
-            color = mix3(color, white, disc);
-
-            // Blue logo detail on top.
             let s = sample_static(mu, mv);
-            let (tx, ty) = (mu - 0.5, mv - 0.5);
-            let tu = face.phase_cos * tx - face.phase_sin * ty + 0.5;
-            let tv = face.phase_sin * tx + face.phase_cos * ty + 0.5;
+            // White face. The static alpha is 3-level: ~1.0 = band (ring shows), ~0.5 = occluder
+            // (front layer, ring hidden), 0 = outside. Both non-zero levels paint white.
+            let a = s[3];
+            let white_op = ((a - 0.25) * 4.0).clamp(0.0, 1.0) * face.fade;
+            color = mix3(color, white, white_op);
+
+            // Text ring, rotated about the pivot, gated to the band so the occluder level hides it.
+            let (tx, ty) = (mu - pivot.0, mv - pivot.1);
+            let tu = face.phase_cos * tx - face.phase_sin * ty + pivot.0;
+            let tv = face.phase_sin * tx + face.phase_cos * ty + pivot.1;
             let t = sample_text(tu, tv);
-            let sd = median3(s).max(median3(t));
-            let opacity = (face.screen_px_range * (sd - 0.5) + 0.5).clamp(0.0, 1.0) * face.fade;
-            color = mix3(color, blue, opacity);
+            let text_gate = ((a - 0.75) * 4.0).clamp(0.0, 1.0);
+            let text_cov = (face.screen_px_range * (median3(t) - 0.5) + 0.5).clamp(0.0, 1.0);
+            color = mix3(color, blue, text_cov * text_gate * face.fade);
+
+            // Static blue linework (rings, features, cap) on top.
+            let static_cov = (face.screen_px_range * (median3([s[0], s[1], s[2]]) - 0.5) + 0.5).clamp(0.0, 1.0);
+            color = mix3(color, blue, static_cov * face.fade);
         }
     }
     color
@@ -207,21 +207,15 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_eyes_give_zero_roll() {
-        let det = detection(Bbox { x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0 }, (30.0, 40.0), (70.0, 40.0));
-        let fi = face_instance(&det, DEFAULT_COVER_SCALE, ATLAS, RANGE, 0.0, 1.0);
-        assert!((fi.roll_cos - 1.0).abs() < 1e-5, "cos 0 = 1");
-        assert!(fi.roll_sin.abs() < 1e-5, "sin 0 = 0");
-    }
-
-    #[test]
-    fn tilted_eyes_give_the_eye_line_angle() {
-        // Right eye 40px right and 40px down of the left eye → roll = atan2(40,40) = 45°.
-        let det = detection(Bbox { x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0 }, (30.0, 30.0), (70.0, 70.0));
-        let fi = face_instance(&det, 1.0, ATLAS, RANGE, 0.0, 1.0);
-        let inv_sqrt2 = 1.0 / 2.0_f32.sqrt();
-        assert!((fi.roll_cos - inv_sqrt2).abs() < 1e-5);
-        assert!((fi.roll_sin - inv_sqrt2).abs() < 1e-5);
+    fn overlay_stays_level_with_the_camera() {
+        // The mask no longer rolls with the head: identity roll (cos 1, sin 0) for horizontal eyes
+        // AND for tilted eyes (right eye 40px down of the left → a 45° head tilt that is ignored).
+        for (le, re) in [((30.0, 40.0), (70.0, 40.0)), ((30.0, 30.0), (70.0, 70.0))] {
+            let det = detection(Bbox { x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0 }, le, re);
+            let fi = face_instance(&det, DEFAULT_COVER_SCALE, ATLAS, RANGE, 0.0, 1.0);
+            assert!((fi.roll_cos - 1.0).abs() < 1e-5, "level: cos = 1");
+            assert!(fi.roll_sin.abs() < 1e-5, "level: sin = 0");
+        }
     }
 
     #[test]
@@ -289,6 +283,7 @@ mod tests {
     const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
     const BLUE: [f32; 3] = [0.137, 0.286, 0.549];
     const VIDEO: [f32; 3] = [0.2, 0.3, 0.4];
+    const CENTER: (f32, f32) = (0.5, 0.5); // ring pivot = mask centre for these synthetic cases
 
     fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
         (0..3).map(|c| (a[c] - b[c]).abs()).sum()
@@ -297,24 +292,41 @@ mod tests {
     #[test]
     fn no_faces_is_passthrough() {
         // Feature off: with no faces the pixel is the untouched video color.
-        let out = composite_pixel(VIDEO, &[], (50.0, 50.0), WHITE, BLUE, |_, _| [1.0; 3], |_, _| [1.0; 3]);
+        let out = composite_pixel(VIDEO, &[], (50.0, 50.0), WHITE, BLUE, CENTER,|_, _| [1.0; 4], |_, _| [1.0; 3]);
         assert_eq!(out, VIDEO);
     }
 
     #[test]
-    fn zero_detail_still_paints_the_white_face() {
-        // Inside the face disc but no MSDF detail (median 0): the white face background still shows —
-        // the "white component" fix. A detail-only composite would leave the video here.
+    fn silhouette_alpha_paints_the_white_face() {
+        // Inside the silhouette (static alpha 1) but no MSDF detail (median 0): the white face shows
+        // — the "white component" fix. A detail-only composite would leave the video here.
         let out = composite_pixel(
             VIDEO,
             &[centered_face(4.0)],
             (50.0, 50.0),
             WHITE,
             BLUE,
-            |_, _| [0.0; 3],
+            CENTER,
+            |_, _| [0.0, 0.0, 0.0, 1.0],
             |_, _| [0.0; 3],
         );
         assert!(dist(out, WHITE) < dist(out, VIDEO), "center is the white face, not video: {out:?}");
+    }
+
+    #[test]
+    fn outside_the_silhouette_is_passthrough() {
+        // Inside the mask box but alpha 0 (outside the silhouette) and no detail → untouched video.
+        let out = composite_pixel(
+            VIDEO,
+            &[centered_face(4.0)],
+            (50.0, 50.0),
+            WHITE,
+            BLUE,
+            CENTER,
+            |_, _| [0.0; 4],
+            |_, _| [0.0; 3],
+        );
+        assert_eq!(out, VIDEO, "no silhouette, no detail → video: {out:?}");
     }
 
     #[test]
@@ -326,7 +338,8 @@ mod tests {
             (50.0, 50.0),
             WHITE,
             BLUE,
-            |_, _| [1.0; 3],
+            CENTER,
+            |_, _| [1.0; 4],
             |_, _| [1.0; 3],
         );
         for c in 0..3 {
@@ -335,42 +348,87 @@ mod tests {
     }
 
     #[test]
-    fn logo_is_blue_detail_on_a_white_face() {
-        // The all-blue synthetic logo composited over video: the open middle of the face shows the
-        // WHITE background (the fix — not video, not blue), while a linework texel reads blue.
+    fn stamped_logo_is_blue_detail_on_a_white_face() {
+        // The all-blue synthetic logo, silhouette-stamped: the open middle of the face shows the
+        // WHITE background (the fix — not video), because the flood-fill enclosed it as interior.
         const N: u32 = 64;
-        let static_buf = crate::logo::synthetic_static(N, 8.0);
+        let mut static_buf = crate::logo::synthetic_static(N, 8.0);
+        crate::logo::stamp_silhouette(&mut static_buf, N);
         let text_buf = crate::logo::synthetic_text(N, 8.0, 8);
-        let sample = |buf: &[u8], u: f32, v: f32| -> [f32; 3] {
+        let sample4 = |buf: &[u8], u: f32, v: f32| -> [f32; 4] {
+            let x = (u.clamp(0.0, 1.0) * (N as f32 - 1.0)) as u32;
+            let y = (v.clamp(0.0, 1.0) * (N as f32 - 1.0)) as u32;
+            let i = ((y * N + x) * 4) as usize;
+            [
+                f32::from(buf[i]) / 255.0,
+                f32::from(buf[i + 1]) / 255.0,
+                f32::from(buf[i + 2]) / 255.0,
+                f32::from(buf[i + 3]) / 255.0,
+            ]
+        };
+        let sample3 = |buf: &[u8], u: f32, v: f32| -> [f32; 3] {
             let x = (u.clamp(0.0, 1.0) * (N as f32 - 1.0)) as u32;
             let y = (v.clamp(0.0, 1.0) * (N as f32 - 1.0)) as u32;
             let i = ((y * N + x) * 4) as usize;
             let c = f32::from(buf[i]) / 255.0;
             [c, c, c]
         };
-        let face = centered_face(8.0);
-        let out = composite_pixel(VIDEO, &[face], (50.0, 50.0), WHITE, BLUE, |u, v| sample(&static_buf, u, v), |u, v| sample(&text_buf, u, v));
-        // Center is the open face middle → the white background, not video.
+        let out = composite_pixel(VIDEO, &[centered_face(8.0)], (50.0, 50.0), WHITE, BLUE, CENTER,|u, v| sample4(&static_buf, u, v), |u, v| sample3(&text_buf, u, v));
         assert!(dist(out, WHITE) < dist(out, VIDEO), "face center is white, not video: {out:?}");
     }
 
     #[test]
     fn roll_rotates_which_mask_texel_a_pixel_samples() {
-        // A static layer "inside" only on its bottom half (v > 0.5). The pixel is in the mask corner
-        // (outside the white face disc, so only the blue detail is in play). With roll 0 it maps to
-        // the mask's bottom half → blue paints; roll 90° maps the same pixel to the top half → no
-        // paint. Same pixel, different coverage: the overlay is genuinely rotated.
-        let bottom_inside = |_u: f32, v: f32| if v > 0.5 { [1.0; 3] } else { [0.0; 3] };
-        let px = (95.0, 70.0); // corner-ward of center (50,50): mask radius ≈ 0.49 > the disc's 0.46
+        // A static layer "inside" only on its bottom half (v > 0.5), alpha 0 (no silhouette, so only
+        // the blue detail is in play). The pixel is offset (+40, +10) from the face center. Roll 0
+        // maps it to the mask's bottom half → blue paints; roll 90° maps the same pixel to the top
+        // half → no paint. Same pixel, different coverage: the overlay is genuinely rotated.
+        let bottom_inside = |_u: f32, v: f32| if v > 0.5 { [1.0, 1.0, 1.0, 0.0] } else { [0.0; 4] };
+        let px = (90.0, 60.0); // (+40, +10) from center (50,50)
 
-        let no_roll = composite_pixel(VIDEO, &[centered_face(8.0)], px, WHITE, BLUE, bottom_inside, |_, _| [0.0; 3]);
+        let no_roll = composite_pixel(VIDEO, &[centered_face(8.0)], px, WHITE, BLUE, CENTER,bottom_inside, |_, _| [0.0; 3]);
         assert!(no_roll != VIDEO, "roll 0: maps to the mask's bottom half → paints");
 
         let mut rolled = centered_face(8.0);
         rolled.roll_cos = 0.0;
         rolled.roll_sin = 1.0; // roll = 90°
         let rolled_out =
-            composite_pixel(VIDEO, &[rolled], px, WHITE, BLUE, bottom_inside, |_, _| [0.0; 3]);
+            composite_pixel(VIDEO, &[rolled], px, WHITE, BLUE, CENTER,bottom_inside, |_, _| [0.0; 3]);
         assert_eq!(rolled_out, VIDEO, "roll 90°: the same pixel maps to the top half → no paint");
+    }
+
+    #[test]
+    fn text_ring_rotates_about_the_pivot_not_the_mask_center() {
+        // 180° ring phase. The pixel maps to mask-uv (0.7, 0.5). A text marker sits at uv (0.5, 0.5).
+        // Rotated 180° about pivot (0.6, 0.5), (0.7,0.5) → (0.5,0.5) → hits the marker → paints.
+        // Rotated about the mask centre (0.5,0.5), it → (0.3,0.5) → misses. Proves the pivot is used.
+        let mut face = centered_face(8.0);
+        face.phase_cos = -1.0;
+        face.phase_sin = 0.0;
+        let px = (70.0, 50.0); // mask-uv (0.7, 0.5)
+        // Band level (alpha 1.0), no static blue → the text gate is open, white shows.
+        let band_static = |_: f32, _: f32| [0.0, 0.0, 0.0, 1.0];
+        let marker = |u: f32, v: f32| if (u - 0.5).abs() < 0.05 && (v - 0.5).abs() < 0.05 { [1.0; 3] } else { [0.0; 3] };
+
+        let about_pivot = composite_pixel(VIDEO, &[face], px, WHITE, BLUE, (0.6, 0.5), band_static, marker);
+        // About the pivot the rotated sample hits the marker → blue text over the white face.
+        assert!(dist(about_pivot, BLUE) < dist(about_pivot, WHITE), "pivot rotation shows the text: {about_pivot:?}");
+        let about_center = composite_pixel(VIDEO, &[face], px, WHITE, BLUE, CENTER, band_static, marker);
+        // About the mask centre it misses the marker → just the white face, no text.
+        assert!(dist(about_center, WHITE) < dist(about_center, BLUE), "centre rotation misses the marker: {about_center:?}");
+    }
+
+    #[test]
+    fn occluder_alpha_hides_the_text() {
+        // Occluder alpha level (0.5) with a text marker present: the text is gated off (front layer
+        // occludes the ring) and only the white face shows. At the band level (1.0) it would paint.
+        let face = centered_face(8.0);
+        let marker = |_: f32, _: f32| [1.0; 3]; // text everywhere
+        let occluder = |_: f32, _: f32| [0.0, 0.0, 0.0, 0.5];
+        let band = |_: f32, _: f32| [0.0, 0.0, 0.0, 1.0];
+        let hidden = composite_pixel(VIDEO, &[face], (50.0, 50.0), WHITE, BLUE, CENTER, occluder, marker);
+        assert!(dist(hidden, WHITE) < dist(hidden, BLUE), "occluder level hides the text: {hidden:?}");
+        let shown = composite_pixel(VIDEO, &[face], (50.0, 50.0), WHITE, BLUE, CENTER, band, marker);
+        assert!(dist(shown, BLUE) < dist(shown, WHITE), "band level shows the text: {shown:?}");
     }
 }

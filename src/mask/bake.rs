@@ -62,8 +62,21 @@ impl Default for BakeParams {
 
 /// Bakes `shape` (in SVG user units) into a `size`×`size` RGBA8 MTSDF, centered with a `range`-texel
 /// margin. Errors on a degenerate (zero-extent) shape.
-pub fn bake_shape(mut shape: Shape<Contour>, params: &BakeParams) -> anyhow::Result<RgbaImage> {
-    let transform = fit_transform(&shape, params.size, params.range)?;
+pub fn bake_shape(shape: Shape<Contour>, params: &BakeParams) -> anyhow::Result<RgbaImage> {
+    let frame = shape_bounds(&shape).ok_or_else(|| anyhow!("shape has no segments"))?;
+    bake_shape_in_frame(shape, params, frame)
+}
+
+/// Like [`bake_shape`], but fits the shape into the atlas using `frame` (a `(min_x, min_y, max_x,
+/// max_y)` bounding box in SVG user units) as the reference extent instead of the shape's own bounds.
+/// Baking several layers with one shared `frame` (their combined bounds) keeps them pixel-aligned —
+/// so a separately-baked static face and text ring composite in register.
+pub fn bake_shape_in_frame(
+    mut shape: Shape<Contour>,
+    params: &BakeParams,
+    frame: (f64, f64, f64, f64),
+) -> anyhow::Result<RgbaImage> {
+    let transform = fit_transform_for_bounds(frame, params.size, params.range)?;
     shape.transform(&transform);
 
     let colored = Shape::edge_coloring_simple(shape, SIN_ALPHA, SEED);
@@ -86,6 +99,50 @@ pub fn bake_shape(mut shape: Shape<Contour>, params: &BakeParams) -> anyhow::Res
     );
 
     Ok(to_rgba8(&msdf))
+}
+
+/// The union bounding box of several layers' shapes in SVG user units, or `None` if all are empty.
+#[must_use]
+pub fn layers_bounds(layers: &[(Shape<Contour>, Fill)]) -> Option<(f64, f64, f64, f64)> {
+    layers
+        .iter()
+        .filter_map(|(shape, _)| shape_bounds(shape))
+        .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+}
+
+/// Bakes each layer into the shared `frame` and unions them, reproducing SVG fill semantics: a texel
+/// is inside the result if it is inside *any* path, so overlapping paths combine instead of XOR-ing
+/// into holes (and a path lying inside another's hole still shows). Each path resolves its own holes
+/// by its own fill rule first.
+///
+/// A single layer keeps its full multi-channel MSDF (sharp corners — e.g. the text). Two or more are
+/// unioned over the **true SDF** (the alpha channel = actual signed distance, so `max` is a real CSG
+/// union — unlike the per-channel MSDF, whose channels can't be maxed independently). The unioned SDF
+/// is written to all four channels, so the shader's `median(r,g,b)` still reconstructs it; corners
+/// soften from MSDF-sharp to plain-SDF, which is invisible on the logo's curved static shapes.
+pub fn bake_layers(
+    layers: Vec<(Shape<Contour>, Fill)>,
+    size: u32,
+    range: f64,
+    frame: (f64, f64, f64, f64),
+) -> anyhow::Result<RgbaImage> {
+    if layers.len() == 1 {
+        let mut layers = layers;
+        let (shape, fill) = layers.remove(0);
+        return bake_shape_in_frame(shape, &BakeParams { size, range, fill }, frame);
+    }
+    let mut union_sd = vec![0u8; (size * size) as usize];
+    for (shape, fill) in layers {
+        let img = bake_shape_in_frame(shape, &BakeParams { size, range, fill }, frame)?;
+        for (u, px) in union_sd.iter_mut().zip(img.pixels()) {
+            *u = (*u).max(px[3]); // alpha = true SDF; max = union of the inside regions
+        }
+    }
+    let mut out = RgbaImage::new(size, size);
+    for (px, &v) in out.pixels_mut().zip(&union_sd) {
+        *px = Rgba([v, v, v, v]);
+    }
+    Ok(out)
 }
 
 // Data-parallel MTSDF generation, replicating fdsm's `sampler_mtsdf`: for each texel, the three
@@ -112,10 +169,14 @@ fn generate_mtsdf_parallel(prepared: &PreparedColoredShape, range: f64, size: u3
     data
 }
 
-// The affine that scales the shape (uniformly, aspect preserved) to fit a `size`×`size` atlas with
-// a `range`-texel margin on every side, centered.
-fn fit_transform(shape: &Shape<Contour>, size: u32, range: f64) -> anyhow::Result<Affine2<f64>> {
-    let (scale, tx, ty) = fit_params(shape, size, range)?;
+// The affine that scales `bounds` (uniformly, aspect preserved) to fit a `size`×`size` atlas with a
+// `range`-texel margin on every side, centered.
+fn fit_transform_for_bounds(
+    bounds: (f64, f64, f64, f64),
+    size: u32,
+    range: f64,
+) -> anyhow::Result<Affine2<f64>> {
+    let (scale, tx, ty) = fit_params_for_bounds(bounds, size, range)?;
     Ok(Affine2::from_matrix_unchecked(Matrix3::new(
         scale, 0.0, tx, 0.0, scale, ty, 0.0, 0.0, 1.0,
     )))
@@ -125,8 +186,18 @@ fn fit_transform(shape: &Shape<Contour>, size: u32, range: f64) -> anyhow::Resul
 /// aspect-preserved, centered, `range`-texel margin. Exposed so a fidelity check can rasterize the
 /// source SVG into exactly the same texel space as the MSDF.
 pub fn fit_params(shape: &Shape<Contour>, size: u32, range: f64) -> anyhow::Result<(f64, f64, f64)> {
-    let (min_x, min_y, max_x, max_y) =
-        shape_bounds(shape).ok_or_else(|| anyhow!("shape has no segments"))?;
+    let bounds = shape_bounds(shape).ok_or_else(|| anyhow!("shape has no segments"))?;
+    fit_params_for_bounds(bounds, size, range)
+}
+
+/// [`fit_params`] against an explicit `(min_x, min_y, max_x, max_y)` frame — used to fit multiple
+/// layers into one shared frame so they stay aligned.
+pub fn fit_params_for_bounds(
+    bounds: (f64, f64, f64, f64),
+    size: u32,
+    range: f64,
+) -> anyhow::Result<(f64, f64, f64)> {
+    let (min_x, min_y, max_x, max_y) = bounds;
     let (width, height) = (max_x - min_x, max_y - min_y);
     let extent = width.max(height);
     if extent <= 0.0 {
@@ -137,15 +208,17 @@ pub fn fit_params(shape: &Shape<Contour>, size: u32, range: f64) -> anyhow::Resu
         return Err(anyhow!("atlas size {size} too small for range {range}"));
     }
     let scale = usable / extent;
-    // Center the scaled shape in the atlas.
+    // Center the scaled frame in the atlas.
     let tx = (f64::from(size) - width * scale) / 2.0 - min_x * scale;
     let ty = (f64::from(size) - height * scale) / 2.0 - min_y * scale;
     Ok((scale, tx, ty))
 }
 
-// The shape's bounding box, sampling each segment along its length (curve extremes fall inside the
-// sampled hull closely enough; the bake's margin absorbs the small slack).
-fn shape_bounds(shape: &Shape<Contour>) -> Option<(f64, f64, f64, f64)> {
+/// The shape's bounding box `(min_x, min_y, max_x, max_y)` in SVG user units, sampling each segment
+/// along its length. `None` for an empty shape. Exposed so a multi-layer bake can union bounds into a
+/// shared frame.
+#[must_use]
+pub fn shape_bounds(shape: &Shape<Contour>) -> Option<(f64, f64, f64, f64)> {
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
@@ -186,9 +259,33 @@ mod tests {
 
     const CIRCLE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#000"/></svg>"##;
     const SQUARE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="10" y="10" width="80" height="80" fill="#000"/></svg>"##;
+    // Two overlapping squares as SEPARATE paths (overlap = [40,60]²). Baked as one shape they XOR the
+    // overlap into a hole; `bake_layers` must union them so the overlap stays inside.
+    const TWO_SQUARES: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M10 10 H60 V60 H10 Z" fill="#000"/><path d="M40 40 H90 V90 H40 Z" fill="#000"/></svg>"##;
 
     const SIZE: u32 = 64;
     const RANGE: f64 = 6.0;
+
+    #[test]
+    fn bake_layers_unions_overlapping_paths_instead_of_xoring() {
+        use crate::mask::{bake_layers, layers_bounds, shape_from_svg, shapes_from_svg};
+        // As one shape (even-odd), the overlap is a hole; the merged bake reads OUTSIDE at (50,50).
+        let merged = bake_shape(
+            shape_from_svg(TWO_SQUARES).expect("parse"),
+            &BakeParams { size: SIZE, range: RANGE, fill: super::Fill::EvenOdd },
+        )
+        .expect("bake");
+        assert!(median(merged.get_pixel(SIZE / 2, SIZE / 2)) < 0.5, "even-odd merge XORs the overlap");
+
+        // As layers, the overlap is unioned → INSIDE at (50,50), and each square's own body too.
+        let layers = shapes_from_svg(TWO_SQUARES).expect("layers");
+        assert_eq!(layers.len(), 2, "two separate paths");
+        let frame = layers_bounds(&layers).expect("bounds");
+        let unioned = bake_layers(layers, SIZE, RANGE, frame).expect("bake_layers");
+        assert!(median(unioned.get_pixel(SIZE / 2, SIZE / 2)) > 0.5, "overlap is inside the union");
+        // A point in only the first square (well within [10,60], clear of the shared frame's margin).
+        assert!(median(unioned.get_pixel(SIZE / 4, SIZE / 4)) > 0.5, "first square body is inside");
+    }
 
     fn bake(svg: &[u8]) -> RgbaImage {
         let shape = shape_from_svg(svg).expect("parse");
