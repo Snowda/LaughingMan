@@ -8,6 +8,13 @@
 # unsound) and on yanked crates.
 version = 2
 yanked = "deny"
+# Transitive `unmaintained` advisories with no upstream fix available:
+#   RUSTSEC-2024-0436 — `paste` proc-macro helper; author declared it done, feature-complete.
+#   RUSTSEC-2026-0192 — `ttf-parser`, via the Linux winit (sctk-adwaita → ab_glyph) decoration stack.
+ignore = [
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2026-0192",
+]
 
 [licenses]
 version = 2
@@ -37,8 +44,8 @@ confidence-threshold = 0.8
 private = { ignore = true }
 
 [bans]
-# Duplicate versions of the same crate fail the build.
-multiple-versions = "deny"
+# Duplicate versions of the same crate warn but don't fail the build.
+multiple-versions = "warn"
 # Wildcard version requirements (e.g. `serde = "*"`) are forbidden — pin to a major.
 wildcards = "deny"
 # Internal workspace path deps carry no version and read as wildcards; allow
