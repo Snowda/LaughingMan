@@ -1,0 +1,55 @@
+# cargo-deny configuration
+# Security gate executed in CI by the cargo-deny workflow. Tuned to be strict on
+# security advisories (the point of the gate) while staying lenient on policy
+# checks that would otherwise produce false failures across these repos.
+
+[advisories]
+# Fail the build on any active RustSec advisory (vulnerabilities, unmaintained,
+# unsound) and on yanked crates.
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Permissive licenses common throughout the Rust ecosystem. Unicode-* covers the
+# unicode-segmentation data tables.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "0BSD",
+    "Unlicense",
+    "NCSA",
+    "MIT-0",
+]
+confidence-threshold = 0.8
+# Don't apply license policy to our own (unpublished) crate.
+private = { ignore = true }
+
+[bans]
+# Duplicate versions of the same crate fail the build.
+multiple-versions = "deny"
+# Wildcard version requirements (e.g. `serde = "*"`) are forbidden — pin to a major.
+wildcards = "deny"
+# Internal workspace path deps carry no version and read as wildcards; allow
+# those while still denying real external `*` requirements.
+allow-wildcard-paths = true
+deny = [
+    # Hermetic, cross-compilable builds only — no openssl anywhere in the tree.
+    { name = "openssl" },
+    { name = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
