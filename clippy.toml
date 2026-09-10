@@ -1,0 +1,5 @@
+# `unwrap`/`expect`/`panic` are denied in production (see Cargo.toml [lints.clippy]), but are the
+# idiomatic way to assert in tests — exempt test code rather than scatter per-module `#[allow]`s.
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+allow-panic-in-tests = true
