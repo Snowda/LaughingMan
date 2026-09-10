@@ -1,8 +1,8 @@
 //! A synthetic animated frame source: scrolling SMPTE-style vertical color bars. Lets the presenter
 //! run (and be verified) without a camera, and gives the user a zero-hardware demo/smoke test.
-#![allow(clippy::as_conversions, clippy::cast_possible_truncation)]
 
 use crate::capture::{Frame, FrameSource};
+use crate::num::Cast as _;
 
 // Eight classic color bars (RGB), left to right.
 const BARS: [[u8; 3]; 8] = [
@@ -36,11 +36,11 @@ impl TestPattern {
     // Builds one frame's RGB bytes for the current scroll offset. Pure, so it is unit-testable.
     fn render(&self) -> Vec<u8> {
         let bar_width = (self.width / 8).max(1);
-        let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
+        let mut rgb = Vec::with_capacity((self.width * self.height * 3).to_usize());
         for _y in 0..self.height {
             for x in 0..self.width {
                 let shifted = (x + self.frame * 2) % self.width;
-                let index = ((shifted / bar_width) % 8) as usize;
+                let index = ((shifted / bar_width) % 8).to_usize();
                 rgb.extend_from_slice(&BARS[index]);
             }
         }

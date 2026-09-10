@@ -2,7 +2,6 @@
 //! `spirv-reader`, and a dynamic-rendering pipeline whose color attachment format matches the
 //! swapchain. Adapted from Aspire vk-run's `graphics.rs`, targeting the swapchain format.
 #![allow(unsafe_code)]
-#![allow(clippy::as_conversions)]
 
 use std::ffi::CString;
 

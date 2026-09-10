@@ -1,14 +1,13 @@
-//! The SCRFD ONNX session (feature `detect`). Loads the model once, then per frame: preprocess →
-//! run → feed the nine stride outputs to the pure [`scrfd::assemble`]. The InsightFace SCRFD_*_KPS
-//! weights are user-provided (non-commercial license — fetched at runtime, never committed); YuNet
-//! (MIT) is the license-clean swap behind the same [`Detector`] trait.
-#![allow(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+//! The SCRFD ONNX session (feature `detect`): load once, then per frame preprocess → run → feed the
+//! nine stride outputs to [`scrfd::assemble`]. Weights are user-provided; YuNet (MIT) swaps in.
 
 use std::path::Path;
 
 use anyhow::Context as _;
 use ort::session::Session;
 use ort::value::Tensor;
+
+use crate::num::Cast as _;
 
 use crate::detect::scrfd::{
     self, INPUT_SIZE, NMS_THRESHOLD, SCORE_THRESHOLD, STRIDES, StrideOutputs,
@@ -51,7 +50,7 @@ impl Detector for ScrfdDetector {
     fn detect(&mut self, rgb: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<Detection>> {
         let scale = scrfd::letterbox_scale(width, height, INPUT_SIZE);
         let input = scrfd::preprocess(rgb, width, height, INPUT_SIZE);
-        let dim = INPUT_SIZE as i64;
+        let dim = INPUT_SIZE.to_i64();
         let tensor = Tensor::from_array((vec![1_i64, 3, dim, dim], input))
             .context("building the input tensor")?;
 
@@ -60,8 +59,7 @@ impl Detector for ScrfdDetector {
             .run(ort::inputs![tensor])
             .context("running SCRFD inference")?;
 
-        // Copy each output to an owned buffer so the borrowed session outputs can be released before
-        // decoding (which borrows the owned buffers instead).
+        // Own each output buffer so the borrowed session outputs release before decode borrows them.
         let mut raw: Vec<Vec<f32>> = Vec::with_capacity(NUM_OUTPUTS);
         for i in 0..NUM_OUTPUTS {
             let (_shape, data) = outputs[i]

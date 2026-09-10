@@ -1,7 +1,6 @@
-//! Face detection. Phase 3 is SCRFD: the pure decode (anchor generation, distance→box/landmarks,
-//! letterbox preprocess) and NMS live here and are fully unit-tested; the ONNX session that runs
-//! the model is behind the `detect` feature (the InsightFace weights are non-commercial, fetched at
-//! runtime, never committed). Tracking/smoothing of these detections is Phase 5.
+//! Face detection (SCRFD): pure decode (anchors, distance→box/landmarks, letterbox) and NMS
+//! live here, unit-tested; the ONNX session is behind the `detect` feature. Tracking (`track`)
+//! and smoothing (`smooth`) live alongside it.
 
 pub mod nms;
 pub mod scrfd;
@@ -10,6 +9,8 @@ pub mod track;
 
 #[cfg(feature = "detect")]
 pub mod session;
+
+use crate::num::Cast as _;
 
 /// An axis-aligned face box in image pixels (top-left origin, y-down).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,8 +38,7 @@ impl Bbox {
     }
 }
 
-/// The five SCRFD landmarks, in order: left eye, right eye, nose, left mouth corner, right mouth
-/// corner — each `(x, y)` in image pixels. The eye/nose triangle drives the overlay's rotation.
+/// The five SCRFD landmarks: left eye, right eye, nose, left/right mouth corner — `(x, y)` pixels.
 pub type Landmarks = [(f32, f32); 5];
 
 /// One detected face: its box, confidence, and landmarks.
@@ -55,9 +55,7 @@ pub trait Detector {
     fn detect(&mut self, rgb: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<Detection>>;
 }
 
-/// A per-frame face source for the presenter — a real detector, or a synthetic demo driven by the
-/// elapsed time (so the compositor can run without a camera or model). `Send` so it can run on the
-/// background detection thread (decoupling detection cadence from the render rate).
+/// A per-frame face source for the presenter — real detector or synthetic demo. `Send` for the detect thread.
 pub trait FaceProvider: Send {
     fn detect_frame(
         &mut self,
@@ -84,13 +82,12 @@ impl FaceProvider for DemoFaceProvider {
     }
 }
 
-#[allow(clippy::as_conversions, clippy::cast_precision_loss)]
 fn demo_detection(width: u32, height: u32, t: f32) -> Detection {
-    let (fw, fh) = (width as f32, height as f32);
+    let (fw, fh) = (width.to_f32(), height.to_f32());
     // Drift the face around the frame center and oscillate the head tilt (roll).
     let cx = fw * 0.5 + fw * 0.18 * (t * 0.6).cos();
     let cy = fh * 0.5 + fh * 0.18 * (t * 0.6).sin();
-    let size = width.min(height) as f32 * 0.28;
+    let size = width.min(height).to_f32() * 0.28;
     let tilt = (t * 0.4).sin() * 0.6;
     let (ec, es) = (tilt.cos(), tilt.sin());
     let e = size * 0.22;

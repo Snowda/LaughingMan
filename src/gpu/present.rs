@@ -3,12 +3,6 @@
 //! `RedrawRequested`: grab a frame, detect faces, track them (coast/smooth), turn each track into a
 //! per-face mask instance with a time-advancing ring phase, and composite. Esc/Space or closing the
 //! window exits.
-#![allow(
-    clippy::as_conversions,
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
 
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -19,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use ash::vk;
+use triomphe::ThinArc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -32,13 +27,14 @@ use crate::gpu::context::VkContext;
 use crate::gpu::renderer::{DrawOutcome, Renderer};
 use crate::gpu::swapchain::Swapchain;
 use crate::logo;
+use crate::num::Cast as _;
 use crate::overlay::{
     DEFAULT_COVER_SCALE, FaceInstance, composite_pixel, face_instance, pack_faces_padded,
 };
 
 /// One frame handed to the background detector.
 struct DetectionInput {
-    rgb: Arc<[u8]>,
+    rgb: ThinArc<(), u8>,
     width: u32,
     height: u32,
     elapsed: f32,
@@ -54,7 +50,7 @@ fn spawn_detector(
     let (out_tx, out_rx) = sync_channel::<Vec<Detection>>(1);
     let handle = std::thread::spawn(move || {
         while let Ok(input) = in_rx.recv() {
-            match provider.detect_frame(&input.rgb, input.width, input.height, input.elapsed) {
+            match provider.detect_frame(&input.rgb.slice, input.width, input.height, input.elapsed) {
                 Ok(dets) => {
                     let _ = out_tx.try_send(dets);
                 }
@@ -127,6 +123,7 @@ pub fn present_window(
     max_frames: Option<u32>,
 ) -> anyhow::Result<()> {
     let event_loop = EventLoop::new().context("creating the winit event loop")?;
+    // Poll, not Wait: a live video feed must redraw every frame, not only on input events.
     event_loop.set_control_flow(ControlFlow::Poll);
     let (detect_in, detect_out, detector) = spawn_detector(faces);
     let mut app = App {
@@ -198,11 +195,11 @@ fn composite_frame(
     size: u32,
     pivot: (f32, f32),
 ) -> image::RgbaImage {
-    let s = size as f32;
+    let s = size.to_f32();
     let texel = |u: f32, v: f32| -> usize {
-        let x = (u.clamp(0.0, 1.0) * (s - 1.0)) as u32;
-        let y = (v.clamp(0.0, 1.0) * (s - 1.0)) as u32;
-        ((y * size + x) * 4) as usize
+        let x = (u.clamp(0.0, 1.0) * (s - 1.0)).to_u32();
+        let y = (v.clamp(0.0, 1.0) * (s - 1.0)).to_u32();
+        ((y * size + x) * 4).to_usize()
     };
     let sample_static = |u: f32, v: f32| -> [f32; 4] {
         let i = texel(u, v);
@@ -222,14 +219,14 @@ fn composite_frame(
     let mut img = image::RgbaImage::new(w, h);
     for py in 0..h {
         for px in 0..w {
-            let vi = ((py * w + px) * 3) as usize;
+            let vi = ((py * w + px) * 3).to_usize();
             let video = [
                 f32::from(frame.rgb[vi]) / 255.0,
                 f32::from(frame.rgb[vi + 1]) / 255.0,
                 f32::from(frame.rgb[vi + 2]) / 255.0,
             ];
-            let out = composite_pixel(video, faces, (px as f32, py as f32), SCREENSHOT_WHITE, SCREENSHOT_BLUE, pivot, &sample_static, &sample_text);
-            let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u8;
+            let out = composite_pixel(video, faces, (px.to_f32(), py.to_f32()), SCREENSHOT_WHITE, SCREENSHOT_BLUE, pivot, &sample_static, &sample_text);
+            let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0).to_u8();
             img.put_pixel(px, py, image::Rgba([q(out[0]), q(out[1]), q(out[2]), 255]));
         }
     }
@@ -257,11 +254,11 @@ fn save_screenshot(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)] // Test helpers surface failures via expect.
 mod screenshot_tests {
     use super::{composite_frame, save_screenshot};
     use crate::capture::Frame;
     use crate::detect::{Bbox, Detection};
+    use crate::num::Cast as _;
     use crate::overlay::{FaceInstance, face_instance};
 
     const SZ: u32 = 40;
@@ -271,7 +268,7 @@ mod screenshot_tests {
     // A 40x40 solid-gray frame + the silhouette-stamped synthetic atlases + one face filling the
     // frame (box 4..36 → centre 20,20), so the face centre samples the white mask.
     fn scene() -> (Frame, Vec<FaceInstance>, Vec<u8>, Vec<u8>) {
-        let frame = Frame { width: SZ, height: SZ, rgb: vec![GRAY; (SZ * SZ * 3) as usize] };
+        let frame = Frame { width: SZ, height: SZ, rgb: vec![GRAY; (SZ * SZ * 3).to_usize()] };
         let mut static_atlas = crate::logo::synthetic_static(ATLAS, 8.0);
         crate::logo::stamp_silhouette(&mut static_atlas, ATLAS); // alpha := band-level face disc
         let text_atlas = crate::logo::blank_atlas(ATLAS);
@@ -280,7 +277,7 @@ mod screenshot_tests {
             score: 1.0,
             landmarks: [(14.0, 16.0), (26.0, 16.0), (20.0, 22.0), (16.0, 28.0), (24.0, 28.0)],
         };
-        let faces = vec![face_instance(&det, 1.0, ATLAS as f32, 8.0, 0.0, 1.0)];
+        let faces = vec![face_instance(&det, 1.0, ATLAS.to_f32(), 8.0, 0.0, 1.0)];
         (frame, faces, static_atlas, text_atlas)
     }
 
@@ -341,10 +338,12 @@ impl App {
             swapchain.format,
             cap_width,
             cap_height,
-            &static_rgba,
-            &text_rgba,
-            msdf_size,
-            ring_pivot,
+            &crate::gpu::renderer::LogoAtlases {
+                static_rgba: &static_rgba,
+                text_rgba: &text_rgba,
+                size: msdf_size,
+                ring_pivot,
+            },
         )?;
 
         let now = Instant::now();
@@ -410,7 +409,7 @@ impl App {
         // Hand the latest frame to the background detector (skipped if it's still busy), and apply
         // any completed detection. On frames without a new result, `tracker.update(&[])` coasts.
         let _ = detect_in.try_send(DetectionInput {
-            rgb: Arc::from(frame.rgb.as_slice()),
+            rgb: ThinArc::from_header_and_slice((), frame.rgb.as_slice()),
             width: frame.width,
             height: frame.height,
             elapsed,
@@ -419,7 +418,7 @@ impl App {
         let tracks = tracker.update(&detections, dt);
 
         let ring_phase = ring_omega * elapsed;
-        let atlas = state.msdf_size as f32;
+        let atlas = state.msdf_size.to_f32();
         let instances: Vec<_> = tracks
             .iter()
             .map(|t| {
@@ -535,6 +534,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Drive the next frame ourselves: under ControlFlow::Poll nothing else requests redraws.
         if let Some(state) = self.state.as_ref() {
             state.window.request_redraw();
         }

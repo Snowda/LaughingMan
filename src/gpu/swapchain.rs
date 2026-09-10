@@ -2,15 +2,16 @@
 //! out-of-date), image views, and acquire/present as safe outcome enums so the frame loop stays
 //! `unsafe`-free at its call sites. Adapted from HardLight's `window/swapchain.rs`.
 #![allow(unsafe_code)]
-#![allow(clippy::as_conversions, clippy::cast_possible_truncation)]
 
 use anyhow::{Context as _, anyhow};
 use ash::vk;
 
 use crate::gpu::context::VkContext;
+use crate::num::Cast as _;
 
 const PREFERRED_FORMAT: vk::Format = vk::Format::B8G8R8A8_SRGB;
 const PREFERRED_COLOR_SPACE: vk::ColorSpaceKHR = vk::ColorSpaceKHR::SRGB_NONLINEAR;
+// One image over the driver minimum, so the CPU can build the next frame while one is presenting.
 const EXTRA_IMAGES: u32 = 1;
 const NO_IMAGE_MAX: u32 = 0;
 const ACQUIRE_TIMEOUT: u64 = u64::MAX;
@@ -122,11 +123,11 @@ impl Swapchain {
     }
 
     pub fn image(&self, index: ImageIndex) -> vk::Image {
-        self.images[index.0 as usize]
+        self.images[index.0.to_usize()]
     }
 
     pub fn view(&self, index: ImageIndex) -> vk::ImageView {
-        self.views[index.0 as usize]
+        self.views[index.0.to_usize()]
     }
 
     fn destroy_views(&mut self) {
@@ -182,6 +183,7 @@ fn build(
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        // FIFO: the only present mode guaranteed available, and it vsyncs (no tearing).
         .present_mode(vk::PresentModeKHR::FIFO)
         .clipped(true)
         .old_swapchain(old);

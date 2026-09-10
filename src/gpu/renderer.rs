@@ -3,20 +3,15 @@
 //! and per-frame sync. `draw` uploads the RGB frame and the packed face instances, then records the
 //! compositor pass into the acquired swapchain image.
 #![allow(unsafe_code)]
-#![allow(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::too_many_arguments
-)]
 
 use anyhow::Context as _;
 use ash::vk;
 
 use crate::gpu::context::VkContext;
 use crate::gpu::pipeline::GraphicsPipeline;
-use crate::gpu::resources::{Buffer, Image, Sampler, transition_image};
+use crate::gpu::resources::{Buffer, Image, Sampler, Transition, transition_image};
 use crate::gpu::swapchain::{Acquired, Presented, Swapchain};
+use crate::num::Cast as _;
 use crate::overlay::{FACE_FLOATS, MAX_FACES};
 use crate::shaders::COMPOSITOR;
 
@@ -27,6 +22,15 @@ const RGBA_BYTES: u64 = 4;
 pub enum DrawOutcome {
     Presented,
     NeedRecreate,
+}
+
+/// The baked logo the renderer uploads once: the static + text MTSDF atlases (RGBA8), their shared
+/// square side length, and the ring pivot in atlas UV.
+pub struct LogoAtlases<'a> {
+    pub static_rgba: &'a [u8],
+    pub text_rgba: &'a [u8],
+    pub size: u32,
+    pub ring_pivot: (f32, f32),
 }
 
 /// The compositor renderer for one swapchain color format, capture resolution, and MSDF atlas size.
@@ -62,11 +66,10 @@ impl Renderer {
         color_format: vk::Format,
         cap_width: u32,
         cap_height: u32,
-        static_rgba: &[u8],
-        text_rgba: &[u8],
-        msdf_size: u32,
-        ring_pivot: (f32, f32),
+        atlases: &LogoAtlases,
     ) -> anyhow::Result<Self> {
+        let msdf_size = atlases.size;
+        let ring_pivot = atlases.ring_pivot;
         let device = ctx.device.clone();
         let pipeline = GraphicsPipeline::new(&device, COMPOSITOR.spv, color_format)?;
         let sampler = Sampler::linear_clamp(&device)?;
@@ -85,12 +88,12 @@ impl Renderer {
         let faces = Buffer::new(
             &device,
             &ctx.memory_properties,
-            (MAX_FACES * FACE_FLOATS * 4) as u64,
+            (MAX_FACES * FACE_FLOATS * 4).to_u64(),
             vk::BufferUsageFlags::STORAGE_BUFFER,
         )?;
 
         // One-time upload of the two MSDF atlases via a transient command buffer.
-        upload_msdf_atlases(ctx, &device, &static_msdf, static_rgba, &text_msdf, text_rgba, msdf_size)?;
+        upload_msdf_atlases(ctx, &device, &static_msdf, atlases.static_rgba, &text_msdf, atlases.text_rgba, msdf_size)?;
 
         let (descriptor_pool, descriptor_set) = build_descriptor_set(&device, &pipeline)?;
         write_descriptor_set(&device, descriptor_set, &video, &static_msdf, &text_msdf, &sampler, &faces);
@@ -122,7 +125,7 @@ impl Renderer {
             descriptor_set,
             image_available,
             render_finished,
-            rgba: Vec::with_capacity((cap_width * cap_height * 4) as usize),
+            rgba: Vec::with_capacity((cap_width * cap_height * 4).to_usize()),
             face_bytes: Vec::with_capacity(MAX_FACES * FACE_FLOATS * 4),
             cap_width,
             cap_height,
@@ -198,33 +201,39 @@ impl Renderer {
 
     // Records the video-texture upload: transition to TRANSFER_DST, copy staging, → SHADER_READ.
     unsafe fn record_video_upload(&self, cmd: vk::CommandBuffer) {
-        transition_image(
-            &self.device, cmd, self.video.raw(),
-            vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
-            vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE,
-        );
+        transition_image(&self.device, cmd, self.video.raw(), &Transition {
+            old_layout: vk::ImageLayout::UNDEFINED,
+            new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            src_stage: vk::PipelineStageFlags::TOP_OF_PIPE,
+            dst_stage: vk::PipelineStageFlags::TRANSFER,
+            src_access: vk::AccessFlags::empty(),
+            dst_access: vk::AccessFlags::TRANSFER_WRITE,
+        });
         let region = copy_region(self.cap_width, self.cap_height);
         // SAFETY: `cmd` is recording; buffer/image live; the region outlives the call.
         unsafe {
             self.device.cmd_copy_buffer_to_image(cmd, self.video_staging.raw(), self.video.raw(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, std::slice::from_ref(&region));
         }
-        transition_image(
-            &self.device, cmd, self.video.raw(),
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::SHADER_READ,
-        );
+        transition_image(&self.device, cmd, self.video.raw(), &Transition {
+            old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            src_stage: vk::PipelineStageFlags::TRANSFER,
+            dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER,
+            src_access: vk::AccessFlags::TRANSFER_WRITE,
+            dst_access: vk::AccessFlags::SHADER_READ,
+        });
     }
 
     // Records the compositor pass into the swapchain image.
     unsafe fn record_pass(&self, cmd: vk::CommandBuffer, swap_image: vk::Image, swap_view: vk::ImageView, extent: vk::Extent2D) {
-        transition_image(
-            &self.device, cmd, swap_image,
-            vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags::empty(), vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-        );
+        transition_image(&self.device, cmd, swap_image, &Transition {
+            old_layout: vk::ImageLayout::UNDEFINED,
+            new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            src_stage: vk::PipelineStageFlags::TOP_OF_PIPE,
+            dst_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_access: vk::AccessFlags::empty(),
+            dst_access: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        });
 
         let clear = vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } };
         let attachment = vk::RenderingAttachmentInfo::default()
@@ -239,13 +248,13 @@ impl Renderer {
             .layer_count(1)
             .color_attachments(&color_attachments);
 
-        let viewport = vk::Viewport { x: 0.0, y: 0.0, width: extent.width as f32, height: extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
+        let viewport = vk::Viewport { x: 0.0, y: 0.0, width: extent.width.to_f32(), height: extent.height.to_f32(), min_depth: 0.0, max_depth: 1.0 };
         let scissor = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent };
 
         // Aspect-preserving letterbox: window fragment → video pixel. `View` = [inv_fit, off_x,
         // off_y, vid_w, vid_h].
-        let (sw, sh) = (extent.width as f32, extent.height as f32);
-        let (vw, vh) = (self.cap_width as f32, self.cap_height as f32);
+        let (sw, sh) = (extent.width.to_f32(), extent.height.to_f32());
+        let (vw, vh) = (self.cap_width.to_f32(), self.cap_height.to_f32());
         let fit = (sw / vw).min(sh / vh);
         let (px, py) = self.ring_pivot;
         let view = [1.0 / fit, (sw - vw * fit) * 0.5, (sh - vh * fit) * 0.5, vw, vh, px, py];
@@ -266,12 +275,14 @@ impl Renderer {
             self.device.cmd_end_rendering(cmd);
         }
 
-        transition_image(
-            &self.device, cmd, swap_image,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE, vk::AccessFlags::empty(),
-        );
+        transition_image(&self.device, cmd, swap_image, &Transition {
+            old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            src_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage: vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            src_access: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dst_access: vk::AccessFlags::empty(),
+        });
     }
 
     fn expand_to_rgba(&mut self, rgb: &[u8]) {
@@ -329,20 +340,24 @@ fn upload_msdf_atlases(
     unsafe {
         device.begin_command_buffer(cmd, &begin).context("begin upload")?;
         for (image, staging) in [(static_msdf, &static_staging), (text_msdf, &text_staging)] {
-            transition_image(
-                device, cmd, image.raw(),
-                vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
-                vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE,
-            );
+            transition_image(device, cmd, image.raw(), &Transition {
+                old_layout: vk::ImageLayout::UNDEFINED,
+                new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                src_stage: vk::PipelineStageFlags::TOP_OF_PIPE,
+                dst_stage: vk::PipelineStageFlags::TRANSFER,
+                src_access: vk::AccessFlags::empty(),
+                dst_access: vk::AccessFlags::TRANSFER_WRITE,
+            });
             let region = copy_region(size, size);
             device.cmd_copy_buffer_to_image(cmd, staging.raw(), image.raw(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, std::slice::from_ref(&region));
-            transition_image(
-                device, cmd, image.raw(),
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::SHADER_READ,
-            );
+            transition_image(device, cmd, image.raw(), &Transition {
+                old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                src_stage: vk::PipelineStageFlags::TRANSFER,
+                dst_stage: vk::PipelineStageFlags::FRAGMENT_SHADER,
+                src_access: vk::AccessFlags::TRANSFER_WRITE,
+                dst_access: vk::AccessFlags::SHADER_READ,
+            });
         }
         device.end_command_buffer(cmd).context("end upload")?;
         let cmds = [cmd];
