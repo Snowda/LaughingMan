@@ -1,6 +1,6 @@
 [package]
 name = "laughing-man"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Conor Forde"]
 edition = "2024"
 rust-version = "1.96"
@@ -17,19 +17,23 @@ default-run = "laughing-man"
 [dependencies]
 # CLI parsing.
 clap = { version = "4", features = ["derive"] }
-# Webcam capture via the native backend (Media Foundation on Windows). `decoding` converts
-# compressed camera formats (MJPEG) to RGB on the CPU.
-nokhwa = { version = "0.10", features = ["input-native", "decoding"] }
+# Webcam capture via the native backend (Media Foundation on Windows). Raw (YUYV) frames only —
+# `default-features = false` drops nokhwa's default `decoding` feature, so no mozjpeg (IJG-licensed)
+# MJPEG decoder is pulled in.
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
 # Error propagation at the binary's top level.
 anyhow = "1"
+# Thin single-word refcounted RGB frame handed to the detector thread (8-byte handle, not
+# `Arc<[u8]>`'s 16). See src/gpu/present.rs `DetectionInput`.
+triomphe = "0.1"
 
 # GPU shaders authored in Aspire's Rust-syntax DSL, lowered to SPIR-V at macro-expansion. `dsl` is
 # the proc-macro; `aspire` carries the `ShaderModule` handle the macro emits; `spirv-reader`
 # reflects the emitted SPIR-V (entry points, descriptor bindings, fragment outputs) to drive
 # Vulkan pipeline/descriptor creation. Path deps — Aspire is checked out beside this repo.
-dsl = { path = "../Aspire/crates/dsl" }
-aspire = { path = "../Aspire/crates/aspire" }
-spirv-reader = { path = "../Aspire/crates/spirv-reader", features = ["ash"] }
+dsl = { path = "../Aspire/crates/dsl", version = "0.1" }
+aspire = { path = "../Aspire/crates/aspire", version = "0.1" }
+spirv-reader = { path = "../Aspire/crates/spirv-reader", version = "0.1", features = ["ash"] }
 
 # Vulkan presenter: ash is the Vulkan binding; ash-window creates the surface from the winit
 # window (raw-window-handle bridges the two); winit owns the window + event loop.
@@ -116,3 +120,10 @@ str_to_string = "deny"
 needless_return = "allow"
 must_use_candidate = "allow"
 disallowed_types = "deny"
+# Panic-macro ban. (stdout/stderr are intentional user-facing output in this CLI/GUI app.)
+unreachable = "deny"
+# Complexity / maintainability signals.
+too_many_lines = "warn"
+excessive_nesting = "warn"
+missing_const_for_fn = "warn"
+too_long_first_doc_paragraph = "warn"

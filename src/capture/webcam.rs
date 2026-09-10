@@ -1,7 +1,4 @@
-//! Webcam capture via nokhwa's native backend (Media Foundation on Windows). Frames are decoded
-//! to RGB8 on the CPU; the raw camera format (MJPEG/YUYV) is negotiated by nokhwa. The pure
-//! format-selection and formatting logic is factored out of the I/O so it can be unit-tested
-//! without a device.
+//! Webcam capture via nokhwa (Media Foundation on Windows) → RGB8; format-selection split for tests.
 
 use anyhow::Context;
 use nokhwa::pixel_format::RgbFormat;
@@ -18,12 +15,11 @@ pub struct Webcam {
     camera: Camera,
 }
 
-/// Builds the requested capture format: closest match to `size` when given, else the highest
-/// resolution the device offers. `RgbFormat` is the CPU decode target regardless.
+/// The requested capture format: closest match to `size`, else the device's highest. Always RGB8.
 fn requested_format(size: Option<(u32, u32)>) -> RequestedFormat<'static> {
     match size {
         Some((w, h)) => RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(
-            CameraFormat::new(Resolution::new(w, h), FrameFormat::MJPEG, 30),
+            CameraFormat::new(Resolution::new(w, h), FrameFormat::YUYV, 30),
         )),
         None => RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestResolution),
     }
@@ -91,21 +87,17 @@ mod tests {
 
     #[test]
     fn requested_format_builds_both_branches() {
-        // Both selection strategies must construct without panicking; exercising each arm covers
-        // the branch and would catch a panic in CameraFormat construction.
         let _sized = requested_format(Some((640, 480)));
         let _highest = requested_format(None);
     }
 
     #[test]
     fn list_cameras_never_errors() {
-        // Enumeration returns 0+ devices on any machine; it must not error.
         assert!(list_cameras().is_ok());
     }
 
     #[test]
     fn open_absent_device_errors() {
-        // No device at this index → a contextual error, never a panic.
         assert!(Webcam::open(9999, None).is_err());
     }
 }
