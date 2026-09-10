@@ -1,10 +1,7 @@
-//! LaughingMan library: capture now, and (in later phases) detection, the MSDF overlay, and GPU
-//! presentation. The `laughing-man` binary is a thin shim over [`run`]; keeping the orchestration
-//! here rather than in `main.rs` makes it unit-testable and keeps the reusable modules together.
-//!
-//! Coverage note: `gpu/**`, `capture/webcam.rs` (device I/O), and `capture/file.rs` (ffmpeg
-//! subprocess + thread I/O) are excluded from the coverage floor (bulwark `ignore_regex`) and
-//! verified by the offscreen render test + running the app, not by headless unit tests.
+//! LaughingMan library: capture, face detection, the MSDF logo overlay, and GPU presentation.
+//! The `laughing-man` binary is a thin shim over [`run`]; orchestration lives here so
+//! it is unit-testable. Coverage note: `gpu/**` and the device/ffmpeg I/O sources are excluded from
+//! the floor (bulwark `ignore_regex`), verified by the offscreen render test + running the app.
 
 pub mod capture;
 pub mod cli;
@@ -13,6 +10,7 @@ mod gpu;
 pub mod logo;
 #[cfg(feature = "bake")]
 pub mod mask;
+pub mod num;
 pub mod overlay;
 pub mod shaders;
 
@@ -253,8 +251,7 @@ mod tests {
 
     #[test]
     fn measured_fps_clamps_zero_frames() {
-        // frames clamped to >= 1, so the result stays finite rather than 0/elapsed nonsense.
-        assert!((measured_fps(0, 1.0) - 1.0).abs() < 1e-9);
+        assert!((measured_fps(0, 1.0) - 1.0).abs() < 1e-9);  // frames clamped to >= 1, so the result stays finite rather than 0/elapsed nonsense.
     }
 
     #[test]
@@ -279,7 +276,6 @@ mod tests {
 
     #[test]
     fn run_capture_errors_on_absent_device() {
-        // A wildly out-of-range index cannot open; run must return the contextual error, not panic.
         let cli = Cli {
             source: 9999,
             size: None,
@@ -293,7 +289,7 @@ mod tests {
             logo_front: None,
             video: None,
             frames: 1,
-        };
+        }; // A wildly out-of-range index cannot open; run must return the contextual error, not panic.
         assert!(run(cli).is_err());
     }
 }

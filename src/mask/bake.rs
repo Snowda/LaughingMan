@@ -1,11 +1,5 @@
-//! The fdsm bake pipeline: fit the shape into the atlas, edge-color it, generate the MTSDF, and
-//! run sign + error correction — producing an RGBA8 image where RGB is the multi-channel SDF
-//! (median = signed distance, 0.5 = edge, > 0.5 inside) and A is the true SDF.
-#![allow(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+//! The fdsm bake pipeline: fit the shape, edge-color it, generate the MTSDF, sign + error-correct.
+//! Output is RGBA8: RGB = multi-channel SDF (median = distance, 0.5 = edge), A = the true SDF.
 
 use anyhow::anyhow;
 use fdsm::bezier::Point;
@@ -19,14 +13,15 @@ use image::{ImageBuffer, Rgba, RgbaImage};
 use nalgebra::{Affine2, Matrix3};
 use rayon::prelude::*;
 
+use crate::num::Cast as _;
+
 // Edge-coloring corner threshold (sine of the angle) and RNG seed — msdfgen's `edgeColoringSimple`.
 const SIN_ALPHA: f64 = 0.03;
 const SEED: u64 = 0;
 // Samples per segment when measuring the shape's bounding box.
 const BOUNDS_SAMPLES: u32 = 8;
 
-/// The SVG fill rule that decides inside/outside — must match the source (e.g. the Laughing Man
-/// logo is `fill-rule:evenodd`, so its holes only read correctly under [`Fill::EvenOdd`]).
+/// The SVG fill rule deciding inside/outside — must match the source (the logo is `fill-rule:evenodd`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fill {
     Nonzero,
@@ -42,8 +37,7 @@ impl Fill {
     }
 }
 
-/// Atlas size (square, texels), the MSDF distance range (texels) mapped into [0, 1], and the fill
-/// rule to sign the shape by.
+/// Atlas size (square texels), the MSDF range (texels) mapped into [0,1], and the fill rule.
 pub struct BakeParams {
     pub size: u32,
     pub range: f64,
@@ -67,10 +61,8 @@ pub fn bake_shape(shape: Shape<Contour>, params: &BakeParams) -> anyhow::Result<
     bake_shape_in_frame(shape, params, frame)
 }
 
-/// Like [`bake_shape`], but fits the shape into the atlas using `frame` (a `(min_x, min_y, max_x,
-/// max_y)` bounding box in SVG user units) as the reference extent instead of the shape's own bounds.
-/// Baking several layers with one shared `frame` (their combined bounds) keeps them pixel-aligned —
-/// so a separately-baked static face and text ring composite in register.
+/// Like [`bake_shape`], but fits using `frame` (`(min_x,min_y,max_x,max_y)` in SVG units) as the extent.
+/// One shared `frame` across layers (their combined bounds) keeps separately-baked layers pixel-aligned.
 pub fn bake_shape_in_frame(
     mut shape: Shape<Contour>,
     params: &BakeParams,
@@ -82,9 +74,7 @@ pub fn bake_shape_in_frame(
     let colored = Shape::edge_coloring_simple(shape, SIN_ALPHA, SEED);
     let prepared = colored.prepare();
 
-    // The MTSDF generation (per-texel min-distance over all edges) is the bake's dominant cost and
-    // is independent per texel — generate it across rows in parallel. The result is identical to
-    // fdsm's sequential `generate_mtsdf` (same sampler math); the fidelity/analytic tests confirm it.
+    // MTSDF generation (per-texel min-distance) is the dominant cost; parallel over rows, identical to fdsm's sequential path.
     let data = generate_mtsdf_parallel(&prepared, params.range, params.size);
     let mut msdf = ImageBuffer::<Rgba<f32>, Vec<f32>>::from_raw(params.size, params.size, data)
         .ok_or_else(|| anyhow!("MTSDF buffer size mismatch"))?;
@@ -110,16 +100,10 @@ pub fn layers_bounds(layers: &[(Shape<Contour>, Fill)]) -> Option<(f64, f64, f64
         .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
 }
 
-/// Bakes each layer into the shared `frame` and unions them, reproducing SVG fill semantics: a texel
-/// is inside the result if it is inside *any* path, so overlapping paths combine instead of XOR-ing
-/// into holes (and a path lying inside another's hole still shows). Each path resolves its own holes
-/// by its own fill rule first.
-///
-/// A single layer keeps its full multi-channel MSDF (sharp corners — e.g. the text). Two or more are
-/// unioned over the **true SDF** (the alpha channel = actual signed distance, so `max` is a real CSG
-/// union — unlike the per-channel MSDF, whose channels can't be maxed independently). The unioned SDF
-/// is written to all four channels, so the shader's `median(r,g,b)` still reconstructs it; corners
-/// soften from MSDF-sharp to plain-SDF, which is invisible on the logo's curved static shapes.
+/// Bakes each layer into the shared `frame` and unions them, reproducing SVG fill semantics: a texel is
+/// inside if inside *any* path (overlaps combine instead of XOR-ing into holes; each path resolves its own
+/// holes first). A single layer keeps its full multi-channel MSDF; two or more union over the **true SDF**
+/// (alpha = real signed distance, so `max` is a real CSG union), written to all channels — corners soften.
 pub fn bake_layers(
     layers: Vec<(Shape<Contour>, Fill)>,
     size: u32,
@@ -131,7 +115,7 @@ pub fn bake_layers(
         let (shape, fill) = layers.remove(0);
         return bake_shape_in_frame(shape, &BakeParams { size, range, fill }, frame);
     }
-    let mut union_sd = vec![0u8; (size * size) as usize];
+    let mut union_sd = vec![0u8; (size * size).to_usize()];
     for (shape, fill) in layers {
         let img = bake_shape_in_frame(shape, &BakeParams { size, range, fill }, frame)?;
         for (u, px) in union_sd.iter_mut().zip(img.pixels()) {
@@ -145,19 +129,17 @@ pub fn bake_layers(
     Ok(out)
 }
 
-// Data-parallel MTSDF generation, replicating fdsm's `sampler_mtsdf`: for each texel, the three
-// colored channels hold the per-channel signed pseudo-distance and alpha holds the true SDF, each
-// mapped `sd/range + 0.5` clamped to [0, 1]. Rows are generated in parallel; `PreparedColoredShape`
-// is shared read-only (`Sync`).
+// Data-parallel MTSDF generation, replicating fdsm's `sampler_mtsdf`: RGB = per-channel signed pseudo-
+// distance, A = true SDF, each `sd/range + 0.5` clamped. Rows parallel; `PreparedColoredShape` is `Sync`.
 fn generate_mtsdf_parallel(prepared: &PreparedColoredShape, range: f64, size: u32) -> Vec<f32> {
-    let width = size as usize;
+    let width = size.to_usize();
     let mut data = vec![0.0f32; width * width * 4];
-    let encode = |sd: f64| (sd / range + 0.5).clamp(0.0, 1.0) as f32;
+    let encode = |sd: f64| (sd / range + 0.5).clamp(0.0, 1.0).to_f32();
     data.par_chunks_mut(width * 4)
         .enumerate()
         .for_each(|(y, row)| {
             for x in 0..width {
-                let point = Point::new(x as f64 + 0.5, y as f64 + 0.5);
+                let point = Point::new(x.to_f64() + 0.5, y.to_f64() + 0.5);
                 let [d_red, d_green, d_blue, d_min] = prepared.distance4(point);
                 let base = x * 4;
                 row[base] = encode(d_red.signed_pseudo_distance(point));
@@ -169,8 +151,7 @@ fn generate_mtsdf_parallel(prepared: &PreparedColoredShape, range: f64, size: u3
     data
 }
 
-// The affine that scales `bounds` (uniformly, aspect preserved) to fit a `size`×`size` atlas with a
-// `range`-texel margin on every side, centered.
+// The affine scaling `bounds` (aspect-preserved) to fit a `size²` atlas with a `range`-texel margin, centered.
 fn fit_transform_for_bounds(
     bounds: (f64, f64, f64, f64),
     size: u32,
@@ -182,16 +163,14 @@ fn fit_transform_for_bounds(
     )))
 }
 
-/// The uniform `(scale, tx, ty)` mapping SVG user units → atlas texels the bake fits a shape with:
-/// aspect-preserved, centered, `range`-texel margin. Exposed so a fidelity check can rasterize the
-/// source SVG into exactly the same texel space as the MSDF.
+/// The uniform `(scale, tx, ty)` mapping SVG units → atlas texels: aspect-preserved, centered, `range` margin.
+/// Exposed so a fidelity check can rasterize the source SVG into the same texel space as the MSDF.
 pub fn fit_params(shape: &Shape<Contour>, size: u32, range: f64) -> anyhow::Result<(f64, f64, f64)> {
     let bounds = shape_bounds(shape).ok_or_else(|| anyhow!("shape has no segments"))?;
     fit_params_for_bounds(bounds, size, range)
 }
 
-/// [`fit_params`] against an explicit `(min_x, min_y, max_x, max_y)` frame — used to fit multiple
-/// layers into one shared frame so they stay aligned.
+/// [`fit_params`] against an explicit `(min_x, min_y, max_x, max_y)` frame — to align multiple layers.
 pub fn fit_params_for_bounds(
     bounds: (f64, f64, f64, f64),
     size: u32,
@@ -214,9 +193,7 @@ pub fn fit_params_for_bounds(
     Ok((scale, tx, ty))
 }
 
-/// The shape's bounding box `(min_x, min_y, max_x, max_y)` in SVG user units, sampling each segment
-/// along its length. `None` for an empty shape. Exposed so a multi-layer bake can union bounds into a
-/// shared frame.
+/// The shape's bounding box `(min_x, min_y, max_x, max_y)` in SVG units (sampling each segment); `None` if empty.
 #[must_use]
 pub fn shape_bounds(shape: &Shape<Contour>) -> Option<(f64, f64, f64, f64)> {
     let mut min_x = f64::INFINITY;
@@ -244,23 +221,22 @@ pub fn shape_bounds(shape: &Shape<Contour>) -> Option<(f64, f64, f64, f64)> {
 fn to_rgba8(src: &ImageBuffer<Rgba<f32>, Vec<f32>>) -> RgbaImage {
     let mut out = RgbaImage::new(src.width(), src.height());
     for (x, y, px) in src.enumerate_pixels() {
-        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round().to_u8();
         out.put_pixel(x, y, Rgba([q(px[0]), q(px[1]), q(px[2]), q(px[3])]));
     }
     out
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)] // Test helpers surface bake failures via expect.
 mod tests {
     use super::{BakeParams, bake_shape};
     use crate::mask::shape_from_svg;
+    use crate::num::Cast as _;
     use image::{Rgba, RgbaImage};
 
     const CIRCLE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#000"/></svg>"##;
     const SQUARE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="10" y="10" width="80" height="80" fill="#000"/></svg>"##;
-    // Two overlapping squares as SEPARATE paths (overlap = [40,60]²). Baked as one shape they XOR the
-    // overlap into a hole; `bake_layers` must union them so the overlap stays inside.
+    // Two overlapping squares as SEPARATE paths: one shape XORs the overlap into a hole; `bake_layers` unions them.
     const TWO_SQUARES: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M10 10 H60 V60 H10 Z" fill="#000"/><path d="M40 40 H90 V90 H40 Z" fill="#000"/></svg>"##;
 
     const SIZE: u32 = 64;
@@ -269,7 +245,6 @@ mod tests {
     #[test]
     fn bake_layers_unions_overlapping_paths_instead_of_xoring() {
         use crate::mask::{bake_layers, layers_bounds, shape_from_svg, shapes_from_svg};
-        // As one shape (even-odd), the overlap is a hole; the merged bake reads OUTSIDE at (50,50).
         let merged = bake_shape(
             shape_from_svg(TWO_SQUARES).expect("parse"),
             &BakeParams { size: SIZE, range: RANGE, fill: super::Fill::EvenOdd },
@@ -277,13 +252,11 @@ mod tests {
         .expect("bake");
         assert!(median(merged.get_pixel(SIZE / 2, SIZE / 2)) < 0.5, "even-odd merge XORs the overlap");
 
-        // As layers, the overlap is unioned → INSIDE at (50,50), and each square's own body too.
         let layers = shapes_from_svg(TWO_SQUARES).expect("layers");
         assert_eq!(layers.len(), 2, "two separate paths");
         let frame = layers_bounds(&layers).expect("bounds");
         let unioned = bake_layers(layers, SIZE, RANGE, frame).expect("bake_layers");
         assert!(median(unioned.get_pixel(SIZE / 2, SIZE / 2)) > 0.5, "overlap is inside the union");
-        // A point in only the first square (well within [10,60], clear of the shared frame's margin).
         assert!(median(unioned.get_pixel(SIZE / 4, SIZE / 4)) > 0.5, "first square body is inside");
     }
 
@@ -315,7 +288,6 @@ mod tests {
         let img = bake(CIRCLE);
         let center = img.get_pixel(SIZE / 2, SIZE / 2);
         let corner = img.get_pixel(1, 1);
-        // Filled interior reads > 0.5 in both the median SDF and the true-SDF alpha; far outside < 0.5.
         assert!(median(center) > 0.6, "center inside: {}", median(center));
         assert!(alpha(center) > 0.6, "center alpha inside: {}", alpha(center));
         assert!(median(corner) < 0.4, "corner outside: {}", median(corner));
@@ -328,9 +300,8 @@ mod tests {
         let (cx, cy) = (SIZE / 2, SIZE / 2);
         let rx = crossing_radius_x(&img, cx, cy).expect("x crossing");
         let ry = crossing_radius_y(&img, cx, cy).expect("y crossing");
-        // A circle: the 0.5 crossing is the same distance along x and y, and well beyond the range.
-        assert!(rx as i64 - ry as i64 == 0 || (rx as i64 - ry as i64).abs() <= 2, "rx={rx} ry={ry}");
-        assert!(rx > RANGE as u32, "crossing {rx} must exceed the range");
+        assert!(rx.to_i64() - ry.to_i64() == 0 || (rx.to_i64() - ry.to_i64()).abs() <= 2, "rx={rx} ry={ry}");
+        assert!(rx > RANGE.to_u32(), "crossing {rx} must exceed the range");
     }
 
     #[test]
@@ -339,10 +310,8 @@ mod tests {
         let square = bake(SQUARE);
         let (cx, cy) = (SIZE / 2, SIZE / 2);
         let r = crossing_radius_x(&circle, cx, cy).expect("crossing");
-        // A diagonal point at 0.8r on each axis: distance 0.8r·√2 ≈ 1.13r > r, so it's OUTSIDE the
-        // circle but INSIDE the square (which shares the circle's bbox). This distinguishes the two
-        // shapes' fields — a constant/broken bake would fail both halves.
-        let off = (f64::from(r) * 0.8) as u32;
+        // Diagonal point at 0.8r on each axis (dist 0.8r√2 ≈ 1.13r > r): outside the circle, inside the square.
+        let off = (f64::from(r) * 0.8).to_u32();
         let (px, py) = (cx + off, cy + off);
         assert!(median(circle.get_pixel(px, py)) < 0.5, "circle corner is outside");
         assert!(median(square.get_pixel(px, py)) > 0.5, "square corner is inside");
@@ -357,26 +326,17 @@ mod tests {
             .zip(square.pixels())
             .filter(|(a, b)| a != b)
             .count();
-        // Different shapes must produce materially different atlases (guards against a no-op bake).
-        assert!(differing > (SIZE * SIZE / 20) as usize, "only {differing} pixels differ");
+        assert!(differing > (SIZE * SIZE / 20).to_usize(), "only {differing} pixels differ");
     }
 }
 
-/// Fidelity: bake an SVG to MSDF, reconstruct its coverage (`median(r,g,b) > 0.5`), and compare —
-/// via intersection-over-union — against an independent resvg rasterization of the *same* SVG into
-/// the *same* texel space (the bake's fit transform). High IoU proves the MSDF faithfully
-/// reproduces the source SVG, not merely "some shape".
+/// Fidelity: bake an SVG to MSDF, reconstruct coverage (`median > 0.5`), and compare (IoU) against an
+/// independent resvg raster of the same SVG in the same texel space. High IoU proves faithful reproduction.
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
 mod fidelity {
     use super::{BakeParams, Fill, bake_shape, fit_params};
     use crate::mask::{shape_from_svg, svg_fill_rule};
+    use crate::num::Cast as _;
     use resvg::tiny_skia::{Pixmap, Transform};
     use resvg::usvg::{Options, Tree};
 
@@ -385,8 +345,7 @@ mod fidelity {
         r.max(g).min(r.min(g).max(b))
     }
 
-    // IoU between the baked MSDF's inside-region and a resvg raster of the same SVG at the bake's
-    // fit and fill rule.
+    // IoU between the baked MSDF inside-region and a resvg raster at the bake's fit and fill rule.
     fn iou_msdf_vs_raster(svg: &[u8], fill: Fill, size: u32, range: f64) -> f64 {
         let shape = shape_from_svg(svg).expect("parse svg");
         let (scale, tx, ty) = fit_params(&shape, size, range).expect("fit");
@@ -399,7 +358,7 @@ mod fidelity {
         let tree = Tree::from_data(svg, &Options::default()).expect("usvg parse");
         let mut pixmap = Pixmap::new(size, size).expect("pixmap");
         let transform =
-            Transform::from_row(scale as f32, 0.0, 0.0, scale as f32, tx as f32, ty as f32);
+            Transform::from_row(scale.to_f32(), 0.0, 0.0, scale.to_f32(), tx.to_f32(), ty.to_f32());
         resvg::render(&tree, transform, &mut pixmap.as_mut());
         let raster: Vec<bool> = pixmap.pixels().iter().map(|px| px.alpha() > 127).collect();
 
@@ -408,7 +367,7 @@ mod fidelity {
         if union == 0 {
             return 1.0;
         }
-        inter as f64 / union as f64
+        inter.to_f64() / union.to_f64()
     }
 
     const CIRCLE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#000"/></svg>"##;
@@ -442,22 +401,19 @@ mod fidelity {
         assert!(iou > 0.95, "evenodd donut IoU too low: {iou}");
     }
 
-    // Heavy + opt-in (`cargo test --features bake -- --ignored`): the full logo has thousands of
-    // text-ring segments, so the O(pixels·segments) fdsm bake takes minutes. The fast SVG fidelity
-    // tests above prove the pipeline generically; this confirms the actual art specifically.
+    // Heavy + opt-in (`--features bake -- --ignored`): the full logo has thousands of segments, so the
+    // O(pixels·segments) bake takes minutes. The fast tests above prove the pipeline; this confirms the art.
     #[test]
     #[ignore = "slow: bakes the full logo (minutes); run with --ignored"]
     fn real_laughing_man_svg_bakes_faithfully_if_present() {
-        // The actual logo is copyrighted and not committed; run this check only when the user has
-        // dropped `laugh.svg` in the crate root. Its fill rule is auto-detected (evenodd).
+        // The copyrighted logo isn't committed; runs only when the user drops `laugh.svg` in the crate root.
         let path = std::path::Path::new("laugh.svg");
         if !path.exists() {
             return;
         }
         let svg = std::fs::read(path).expect("read laugh.svg");
         let fill = svg_fill_rule(&svg);
-        // 256² keeps the fdsm bake (O(pixels·segments) over this detailed logo) tractable in a test;
-        // 0.88 tolerates thin sub-texel strokes at this resolution.
+        // 256² keeps the bake tractable; 0.88 tolerates thin sub-texel strokes at this resolution.
         let iou = iou_msdf_vs_raster(&svg, fill, 256, 6.0);
         assert!(iou > 0.88, "laugh.svg MSDF vs SVG raster IoU too low ({iou}, fill {fill:?})");
     }

@@ -6,7 +6,6 @@
 //!
 //! The 8-state constant-velocity model `[cx, cy, w, h, ẋ, ẏ, ẇ, ḣ]` decouples into four independent
 //! 2-state (position, velocity) filters — one per box parameter — which [`Kf1d`] implements.
-#![allow(clippy::as_conversions, clippy::cast_precision_loss)]
 
 use std::cmp::Ordering;
 
@@ -331,7 +330,6 @@ impl Tracker {
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_precision_loss)]
 mod tests {
     use super::{Kf1d, Tracker, TrackerParams};
     use crate::detect::{Bbox, Detection, Landmarks};
@@ -384,9 +382,7 @@ mod tests {
 
     #[test]
     fn coasts_through_missed_detections_without_a_gap() {
-        // A track moving at 60 px/s, then the detector drops out for 0.2 s (< the 0.4 s coast). The
-        // track must keep producing output every frame, and its predicted center must follow the
-        // ground-truth motion.
+        // Track at 60 px/s, detector drops 0.2 s (< 0.4 s coast): output every frame, following truth.
         let v = 60.0;
         let (mut tracker, mut cx, cy) = confirmed_moving_tracker(v);
         for i in 0..6 {
@@ -402,11 +398,9 @@ mod tests {
 
     #[test]
     fn lost_track_fades_to_zero_then_is_removed() {
-        // After the detector stops, the fade must be non-increasing, drop near zero, and the track
-        // must eventually be dropped entirely (no permanent stuck mask).
+        // After detections stop: fade non-increasing, drops near zero, track eventually removed.
         let (mut tracker, _, _) = confirmed_moving_tracker(0.0);
-        // A fine timestep so the fade resolves smoothly through the near-zero region rather than
-        // stepping over it (the fade window is only ~4 frames wide at 30 fps).
+        // Fine timestep so the ~4-frame fade window resolves smoothly through the near-zero region.
         let fine_dt = 1.0 / 120.0;
         let mut prev_fade = 1.0f32;
         let mut removed = false;
@@ -431,9 +425,7 @@ mod tests {
 
     #[test]
     fn reacquisition_after_a_gap_does_not_jump() {
-        // Coast a constant-velocity track for a few frames, then the detection reappears at the
-        // ground-truth position. The output pose must be continuous (the coasted prediction was
-        // already near the truth, so the correction is small).
+        // Coast a few frames, then the detection reappears at ground truth: the pose stays continuous.
         let v = 60.0;
         let (mut tracker, mut cx, cy) = confirmed_moving_tracker(v);
         let mut last_coast = cx;

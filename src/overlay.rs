@@ -1,26 +1,17 @@
 //! Landmarks → per-face mask placement, and a CPU mirror of the compositor's per-pixel math.
-//!
-//! [`face_instance`] turns a [`Detection`] into the GPU `FaceInstance` the compositor shader loops
-//! over: the face center + half-size (frame pixels), the roll and ring-phase rotations precomputed
-//! as cos/sin (so the shader needs no trig), the screen-space AA range, and a track fade. The overlay
-//! is kept level with the camera (identity roll), so it no longer tilts with the head; the ring phase
-//! still spins the text layer. [`composite_pixel`] is the exact per-pixel math the
-//! fragment shader performs, kept here so the compositing logic is verified analytically on the CPU
-//! (the shader is a faithful DSL translation, reflection-checked in `shaders`).
-#![allow(clippy::as_conversions)]
+//! [`face_instance`] turns a [`Detection`] into the GPU `FaceInstance` the compositor loops over
+//! (center + half-size, roll/ring-phase as cos/sin, AA range, fade; overlay kept level with the
+//! camera). [`composite_pixel`] is the exact per-pixel shader math, kept here for CPU verification.
 
 use crate::detect::Detection;
 
-/// Maximum faces composited per frame (the compositor storage buffer / uniform bound).
 pub const MAX_FACES: usize = 8;
 /// The mask art overhangs the face box; scale the box up to cover the whole head.
 pub const DEFAULT_COVER_SCALE: f32 = 1.6;
-/// f32 per `FaceInstance` in the std430 storage buffer. All-scalar (no vec2), so struct align is 4
-/// and the array stride is exactly 9·4 = 36 bytes.
+/// f32 per `FaceInstance` in the std430 buffer; all-scalar, so the array stride is 9·4 = 36 bytes.
 pub const FACE_FLOATS: usize = 9;
 
-/// One face's GPU instance data. `#[repr(C)]` and std430-compatible: it matches the shader's `Face`
-/// storage struct field-for-field (`center_x`, `center_y`, then the seven placement scalars).
+/// One face's GPU instance data. `#[repr(C)]` std430-compatible: matches the shader's `Face` struct.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaceInstance {
@@ -52,10 +43,8 @@ impl FaceInstance {
     }
 }
 
-/// Builds the mask instance for `det`: center = box center; half-size = the larger box dimension
-/// scaled by `cover_scale`; the overlay is kept level with the camera (identity roll, so it does not
-/// tilt with the head); the ring phase spins the text layer; `screen_px_range` is the MSDF AA range at
-/// this on-screen size (`px_range` texels spread over the mask's screen extent), floored at 1.
+/// Builds the mask instance for `det`: center = box center; half-size = larger box dim × `cover_scale`;
+/// overlay kept level (identity roll); ring phase spins the text; `screen_px_range` is the MSDF AA range, floored at 1.
 #[must_use]
 pub fn face_instance(
     det: &Detection,
@@ -93,9 +82,7 @@ pub fn pack_faces(faces: &[FaceInstance]) -> Vec<f32> {
         .collect()
 }
 
-/// Like [`pack_faces`] but always emits exactly [`MAX_FACES`] instances, padding with invisible
-/// (`fade = 0`) faces so the compositor's storage buffer has a fixed length and the shader can loop
-/// a constant count.
+/// Like [`pack_faces`] but always emits [`MAX_FACES`] instances, padding with invisible (`fade = 0`) faces.
 #[must_use]
 pub fn pack_faces_padded(faces: &[FaceInstance]) -> Vec<f32> {
     let dummy = FaceInstance {
@@ -129,12 +116,9 @@ fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-/// The compositor fragment's per-pixel math, on the CPU. For each face: rotate the pixel offset by
-/// `-roll` into mask-local space, and if it lands within the mask, paint the `white` face (both alpha
-/// levels), draw the ring-phase-rotated text `blue` gated to the band level, then the static `blue`
-/// linework on top. The static alpha is 3-level: ~1.0 band (text shows), ~0.5 occluder (front layer,
-/// text hidden), 0 outside; the text is rotated about `pivot` (the logo's circle centre in mask UV).
-/// `sample_static` returns the static texel `(r,g,b,a)`; `sample_text` the text MSDF `(r,g,b)`.
+/// The compositor fragment's per-pixel math, on the CPU. Per face: rotate the pixel by `-roll` into
+/// mask-local space; if inside, paint `white` (both alpha levels), the ring-phase text `blue` gated to
+/// the band, then static `blue` linework. Static alpha: ~1.0 band, ~0.5 occluder, 0 outside; text about `pivot`.
 pub fn composite_pixel(
     video: [f32; 3],
     faces: &[FaceInstance],
@@ -156,8 +140,7 @@ pub fn composite_pixel(
         let mv = ly / (2.0 * face.half_size) + 0.5;
         if (0.0..=1.0).contains(&mu) && (0.0..=1.0).contains(&mv) {
             let s = sample_static(mu, mv);
-            // White face. The static alpha is 3-level: ~1.0 = band (ring shows), ~0.5 = occluder
-            // (front layer, ring hidden), 0 = outside. Both non-zero levels paint white.
+            // Static alpha is 3-level: ~1.0 band (ring shows), ~0.5 occluder (ring hidden), 0 outside; both paint white.
             let a = s[3];
             let white_op = ((a - 0.25) * 4.0).clamp(0.0, 1.0) * face.fade;
             color = mix3(color, white, white_op);
@@ -185,6 +168,7 @@ mod tests {
         DEFAULT_COVER_SCALE, FaceInstance, MAX_FACES, composite_pixel, face_instance, pack_faces,
     };
     use crate::detect::{Bbox, Detection};
+    use crate::num::Cast as _;
 
     const ATLAS: f32 = 1024.0;
     const RANGE: f32 = 8.0;
@@ -208,8 +192,7 @@ mod tests {
 
     #[test]
     fn overlay_stays_level_with_the_camera() {
-        // The mask no longer rolls with the head: identity roll (cos 1, sin 0) for horizontal eyes
-        // AND for tilted eyes (right eye 40px down of the left → a 45° head tilt that is ignored).
+        // The mask no longer rolls with the head: identity roll for horizontal AND tilted eyes.
         for (le, re) in [((30.0, 40.0), (70.0, 40.0)), ((30.0, 30.0), (70.0, 70.0))] {
             let det = detection(Bbox { x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0 }, le, re);
             let fi = face_instance(&det, DEFAULT_COVER_SCALE, ATLAS, RANGE, 0.0, 1.0);
@@ -291,15 +274,13 @@ mod tests {
 
     #[test]
     fn no_faces_is_passthrough() {
-        // Feature off: with no faces the pixel is the untouched video color.
         let out = composite_pixel(VIDEO, &[], (50.0, 50.0), WHITE, BLUE, CENTER,|_, _| [1.0; 4], |_, _| [1.0; 3]);
         assert_eq!(out, VIDEO);
     }
 
     #[test]
     fn silhouette_alpha_paints_the_white_face() {
-        // Inside the silhouette (static alpha 1) but no MSDF detail (median 0): the white face shows
-        // — the "white component" fix. A detail-only composite would leave the video here.
+        // Inside the silhouette (alpha 1) but no MSDF detail: the white face shows (the "white component" fix).
         let out = composite_pixel(
             VIDEO,
             &[centered_face(4.0)],
@@ -315,7 +296,6 @@ mod tests {
 
     #[test]
     fn outside_the_silhouette_is_passthrough() {
-        // Inside the mask box but alpha 0 (outside the silhouette) and no detail → untouched video.
         let out = composite_pixel(
             VIDEO,
             &[centered_face(4.0)],
@@ -331,7 +311,6 @@ mod tests {
 
     #[test]
     fn full_detail_paints_blue_over_the_white_face() {
-        // MSDF fully inside (median 1) → the blue logo detail covers the white face at this pixel.
         let out = composite_pixel(
             VIDEO,
             &[centered_face(4.0)],
@@ -349,16 +328,15 @@ mod tests {
 
     #[test]
     fn stamped_logo_is_blue_detail_on_a_white_face() {
-        // The all-blue synthetic logo, silhouette-stamped: the open middle of the face shows the
-        // WHITE background (the fix — not video), because the flood-fill enclosed it as interior.
+        // All-blue synthetic logo, silhouette-stamped: the open middle shows WHITE (flood-fill interior), not video.
         const N: u32 = 64;
         let mut static_buf = crate::logo::synthetic_static(N, 8.0);
         crate::logo::stamp_silhouette(&mut static_buf, N);
         let text_buf = crate::logo::synthetic_text(N, 8.0, 8);
         let sample4 = |buf: &[u8], u: f32, v: f32| -> [f32; 4] {
-            let x = (u.clamp(0.0, 1.0) * (N as f32 - 1.0)) as u32;
-            let y = (v.clamp(0.0, 1.0) * (N as f32 - 1.0)) as u32;
-            let i = ((y * N + x) * 4) as usize;
+            let x = (u.clamp(0.0, 1.0) * (N.to_f32() - 1.0)).to_u32();
+            let y = (v.clamp(0.0, 1.0) * (N.to_f32() - 1.0)).to_u32();
+            let i = ((y * N + x) * 4).to_usize();
             [
                 f32::from(buf[i]) / 255.0,
                 f32::from(buf[i + 1]) / 255.0,
@@ -367,9 +345,9 @@ mod tests {
             ]
         };
         let sample3 = |buf: &[u8], u: f32, v: f32| -> [f32; 3] {
-            let x = (u.clamp(0.0, 1.0) * (N as f32 - 1.0)) as u32;
-            let y = (v.clamp(0.0, 1.0) * (N as f32 - 1.0)) as u32;
-            let i = ((y * N + x) * 4) as usize;
+            let x = (u.clamp(0.0, 1.0) * (N.to_f32() - 1.0)).to_u32();
+            let y = (v.clamp(0.0, 1.0) * (N.to_f32() - 1.0)).to_u32();
+            let i = ((y * N + x) * 4).to_usize();
             let c = f32::from(buf[i]) / 255.0;
             [c, c, c]
         };
@@ -379,10 +357,8 @@ mod tests {
 
     #[test]
     fn roll_rotates_which_mask_texel_a_pixel_samples() {
-        // A static layer "inside" only on its bottom half (v > 0.5), alpha 0 (no silhouette, so only
-        // the blue detail is in play). The pixel is offset (+40, +10) from the face center. Roll 0
-        // maps it to the mask's bottom half → blue paints; roll 90° maps the same pixel to the top
-        // half → no paint. Same pixel, different coverage: the overlay is genuinely rotated.
+        // Static "inside" only on its bottom half (v>0.5), alpha 0. Pixel offset (+40,+10) from center:
+        // roll 0 maps to the bottom half → blue paints; roll 90° maps to the top → no paint. Same pixel, rotated.
         let bottom_inside = |_u: f32, v: f32| if v > 0.5 { [1.0, 1.0, 1.0, 0.0] } else { [0.0; 4] };
         let px = (90.0, 60.0); // (+40, +10) from center (50,50)
 
@@ -399,9 +375,8 @@ mod tests {
 
     #[test]
     fn text_ring_rotates_about_the_pivot_not_the_mask_center() {
-        // 180° ring phase. The pixel maps to mask-uv (0.7, 0.5). A text marker sits at uv (0.5, 0.5).
-        // Rotated 180° about pivot (0.6, 0.5), (0.7,0.5) → (0.5,0.5) → hits the marker → paints.
-        // Rotated about the mask centre (0.5,0.5), it → (0.3,0.5) → misses. Proves the pivot is used.
+        // 180° ring phase, pixel at mask-uv (0.7,0.5), marker at (0.5,0.5). About pivot (0.6,0.5) it
+        // rotates to (0.5,0.5) → hits; about the mask centre → (0.3,0.5) misses. Proves the pivot is used.
         let mut face = centered_face(8.0);
         face.phase_cos = -1.0;
         face.phase_sin = 0.0;
@@ -420,8 +395,7 @@ mod tests {
 
     #[test]
     fn occluder_alpha_hides_the_text() {
-        // Occluder alpha level (0.5) with a text marker present: the text is gated off (front layer
-        // occludes the ring) and only the white face shows. At the band level (1.0) it would paint.
+        // Occluder alpha (0.5) with a text marker: text gated off (front layer occludes), only white shows.
         let face = centered_face(8.0);
         let marker = |_: f32, _: f32| [1.0; 3]; // text everywhere
         let occluder = |_: f32, _: f32| [0.0, 0.0, 0.0, 0.5];

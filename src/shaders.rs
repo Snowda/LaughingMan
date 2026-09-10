@@ -1,10 +1,8 @@
 //! GPU shaders authored in Aspire's `dsl` (Rust-syntax lowered to SPIR-V at macro-expansion time).
-//! The `#[spirv_shader] mod passthrough` is replaced by the macro with `pub const PASSTHROUGH:
-//! aspire::ShaderModule` at this module's scope; `.spv` is the lowered bytes the presenter feeds to
-//! `VkShaderModule`, and `spirv-reader` reflects the same bytes to build the descriptor layout.
-//!
-//! Phase 1 has one module: a fullscreen triangle whose fragment samples the uploaded video frame.
-//! The overlay compositor (video + MSDF logo, per-face uniforms) replaces `fs_main` in Phase 4.
+//! `#[spirv_shader] mod passthrough` expands to `pub const PASSTHROUGH: aspire::ShaderModule`; `.spv`
+//! is the lowered bytes, and `spirv-reader` reflects them to build the descriptor layout. `passthrough`
+//! is the original fullscreen-triangle frame sampler (now test-only); `compositor` is the active
+//! runtime shader (the renderer builds its pipeline) — video plus the per-face MSDF logo overlay.
 
 use dsl::spirv_shader;
 
@@ -18,9 +16,7 @@ mod passthrough {
         #[position] out_pos: &mut F32Vec4,
         #[location(0)] out_uv: &mut F32Vec2,
     ) {
-        // Fullscreen triangle: UVs (0,0),(2,0),(0,2) → clip (-1,-1),(3,-1),(-1,3). The visible
-        // [-1,1] square interpolates UV across [0,1]. Vulkan clip-space y points down, so UV
-        // origin (0,0) lands at the framebuffer top-left, matching row 0 of the uploaded frame.
+        // Fullscreen triangle: UVs (0,0),(2,0),(0,2) → clip (-1,-1),(3,-1),(-1,3); y-down so UV origin is top-left.
         let u = ((i << 1) & 2) as f32;
         let v = (i & 2) as f32;
         *out_uv = F32Vec2::new(u, v);
@@ -38,11 +34,9 @@ mod passthrough {
     }
 }
 
-/// The compositor: samples the video frame and, for each detected face, overlays the Laughing Man
-/// MSDF logo (a static layer + a ring-phase-rotated text layer). Set 0 — binding 0: video texture,
-/// 1: linear sampler, 2: static MSDF, 3: text MSDF, 4: a storage buffer of `Face` instances (see
-/// `overlay::FaceInstance`; all-scalar so the std430 stride is 36 bytes). The per-pixel math mirrors
-/// `overlay::composite_pixel`, which is verified analytically on the CPU.
+/// The compositor: samples the video frame and, per detected face, overlays the Laughing Man MSDF
+/// logo (static layer + phase-rotated text). Set 0: video(0), sampler(1), static(2), text(3),
+/// `Face` storage(4) — std430 stride 36. Per-pixel math mirrors `overlay::composite_pixel`.
 #[spirv_shader]
 mod compositor {
     struct Face {
@@ -110,8 +104,7 @@ mod compositor {
         let n = faces.len();
         let mut i = 0u32;
         while i < n {
-            // Overlay math is in video pixels, so it is isotropic (rotation-correct) and aligned to
-            // the video wherever the letterbox places it.
+            // Overlay math in video pixels: isotropic (rotation-correct) and aligned to the letterboxed video.
             let dx = vpx_x - faces[i].center_x;
             let dy = vpx_y - faces[i].center_y;
             // R(-roll) · (dx, dy) into mask-local pixels, then map to [0, 1] mask UV.
@@ -122,15 +115,12 @@ mod compositor {
             let mv = ly * inv + 0.5;
             if mu >= 0.0 && mu <= 1.0 && mv >= 0.0 && mv <= 1.0 {
                 let s = static_tex.sample(samp, F32Vec2::new(mu, mv));
-                // White face background. The static alpha is 3-level: ~1.0 = band (ring shows), ~0.5 =
-                // occluder (front layer, ring hidden), 0 = outside. Both non-zero levels paint white.
+                // Static alpha is 3-level: ~1.0 band (ring shows), ~0.5 occluder (ring hidden), 0 outside; both paint white.
                 let a = s.w;
                 let white_op = ((a - 0.25) * 4.0).clamp(0.0, 1.0) * faces[i].fade;
                 color = color.mix(white, white_op);
 
-                // Rotating text ring, phase-rotated about the logo's circle centre (the pivot, not the
-                // atlas centre which the cap brim shifts). Gated to the band only, so the front layer's
-                // white (the occluder level) hides it — the hat reads as in front of the ring.
+                // Rotating text ring about the logo pivot (not the atlas centre); gated to the band so the front layer hides it.
                 let tx = mu - view.pivot_x;
                 let ty = mv - view.pivot_y;
                 let tu = faces[i].phase_cos * tx - faces[i].phase_sin * ty + view.pivot_x;
@@ -250,13 +240,12 @@ mod tests {
     }
 }
 
-// GPU render verification: builds a real Vulkan pipeline from the passthrough shader (via
-// spirv-reader reflection), renders it over a known texture, and reads the pixels back — proving
-// the whole Aspire → spirv-reader → ash graphics path produces correct output on hardware. Behind
-// the `integration_tests` feature; skips cleanly when no Vulkan device is present.
+// GPU render verification: builds a real Vulkan pipeline from the passthrough shader and reads pixels
+// back — proving the Aspire → spirv-reader → ash path. Behind `integration_tests`; skips with no device.
 #[cfg(all(test, feature = "integration_tests"))]
 mod gpu_tests {
     use super::PASSTHROUGH;
+    use crate::num::Cast as _;
     use std::error::Error;
     use vk_run::{Gpu, ImageFormat, ImageInput, render_texture};
 
@@ -267,7 +256,7 @@ mod gpu_tests {
 
     // An 8x8 Rgba8 texture split left→right: columns 0..4 red, 4..8 green.
     fn split_texture() -> Vec<u8> {
-        let mut texels = Vec::with_capacity((DIM * DIM) as usize * 4);
+        let mut texels = Vec::with_capacity((DIM * DIM).to_usize() * 4);
         for _y in 0..DIM {
             for x in 0..DIM {
                 if x < DIM / 2 {
@@ -282,7 +271,7 @@ mod gpu_tests {
 
     // The RGBA32F float lanes of output pixel (x, y).
     fn pixel_at(pixels: &[f32], x: u32, y: u32) -> [f32; 4] {
-        let base = ((y * DIM + x) as usize) * LANES;
+        let base = (y * DIM + x).to_usize() * LANES;
         [pixels[base], pixels[base + 1], pixels[base + 2], pixels[base + 3]]
     }
 
@@ -310,11 +299,10 @@ mod gpu_tests {
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-        assert_eq!(pixels.len(), (DIM * DIM) as usize * LANES);
+        assert_eq!(pixels.len(), (DIM * DIM).to_usize() * LANES);
 
-        // Corners sample deep inside each color region (clamp addressing keeps them pure), so the
-        // left corner must be red and the right corner green: the fragment samples the bound frame
-        // and passes it through spatially. A constant-output shader would fail the differ check.
+        // Corners sample deep inside each region (clamp addressing), so left is red and right green:
+        // the fragment samples the frame spatially. A constant-output shader would fail the differ.
         let top_left = pixel_at(&pixels, 0, 0);
         let top_right = pixel_at(&pixels, DIM - 1, 0);
         assert!(close(top_left, [1.0, 0.0, 0.0, 1.0]), "left corner is red: {top_left:?}");

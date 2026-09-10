@@ -1,8 +1,5 @@
-//! Video-file frames via ffmpeg. `ffmpeg-sidecar` spawns a standalone ffmpeg (auto-downloaded on
-//! first use if none is installed) that decodes the file to raw rgb24 on a pipe. A worker thread
-//! pumps decoded frames into a bounded channel — so the ffmpeg child + its borrowing iterator stay
-//! contained in the thread — and `next_frame` receives them. The last frame is held on end-of-file
-//! (a static freeze) rather than erroring every frame.
+//! Video-file frames via ffmpeg (`ffmpeg-sidecar`, auto-downloaded). A worker thread decodes to
+//! rgb24 into a bounded channel; the last frame is held on EOF (a freeze) rather than erroring.
 
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
@@ -21,8 +18,7 @@ struct Audio {
     _player: Player,
 }
 
-// Starts playing the video file's own audio track (decoded via symphonia). `None` — logged, video
-// plays silently — when there is no output device, no audio stream, or the codec isn't supported.
+// Plays the file's own audio track (symphonia). `None` (logged, silent) when no device/stream/codec.
 fn start_audio(path: &Path) -> Option<Audio> {
     let mut sink = DeviceSinkBuilder::open_default_sink().ok()?;
     // Silence rodio's "audio will stop" warning when we drop the sink on exit.
@@ -43,9 +39,7 @@ const FRAME_BUFFER: usize = 8;
 // A decoded frame plus its presentation timestamp (seconds), used to pace playback to real time.
 type TimedFrame = (Frame, f32);
 
-/// A video file decoded to RGB frames on a background ffmpeg process, presented in real time (each
-/// frame is held until its timestamp is due, so playback runs at the source's own frame rate rather
-/// than the render rate).
+/// A video file decoded to RGB frames by a background ffmpeg process, presented in real time.
 pub struct VideoFile {
     frames: Receiver<TimedFrame>,
     current: Option<TimedFrame>,
@@ -92,9 +86,7 @@ impl VideoFile {
     }
 }
 
-// Runs ffmpeg to completion, announcing the first frame's dimensions on `meta_tx` then streaming
-// every (frame, timestamp) to `frame_tx`. All ffmpeg objects live here, so their lifetimes never
-// cross threads.
+// Runs ffmpeg to completion: announce the first frame's dims on `meta_tx`, stream frames to `frame_tx`.
 fn decode_loop(
     path: &str,
     meta_tx: &std::sync::mpsc::Sender<anyhow::Result<(u32, u32)>>,
@@ -144,8 +136,7 @@ impl FrameSource for VideoFile {
         let start = *self.start.get_or_insert(now);
         let elapsed = (now - start).as_secs_f32();
 
-        // Advance to the newest frame whose presentation time is due; hold otherwise. This paces the
-        // video to real time regardless of the (faster) render rate, and catches up if we fall behind.
+        // Advance to the newest due frame; hold otherwise — pacing to real time, catching up if behind.
         loop {
             if self.pending.is_none() {
                 match self.frames.try_recv() {

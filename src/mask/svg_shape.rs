@@ -1,10 +1,6 @@
-//! SVG → fdsm `Shape<Contour>`. usvg lowers strokes/primitives to filled paths; we stream every
-//! filled path's segments (with its absolute transform applied) into fdsm contours. fdsm takes
-//! cubics natively, so no flattening; SVG coordinates are kept y-down to match the bake's image
-//! space, and the SVG winding is preserved so the bake's `FillRule::Nonzero` resolves inside/outside.
-//!
-//! Live `<text>` is dropped (usvg needs fonts to shape it); convert text to paths in the editor —
-//! which is exactly how the logo's text ring is prepared for the rotating-layer bake.
+//! SVG → fdsm `Shape<Contour>`. usvg lowers strokes/primitives to filled paths; we stream each
+//! filled path's segments (absolute transform applied) as fdsm contours (cubics native, y-down,
+//! winding preserved). Live `<text>` is dropped — convert text to paths first (as the logo's ring is).
 
 use anyhow::{Context as _, anyhow};
 use fdsm::bezier::{Point, Segment};

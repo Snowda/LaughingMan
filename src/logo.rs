@@ -1,27 +1,20 @@
-//! A procedural stand-in for the Laughing Man logo MSDF atlases, so the compositor runs (and is
-//! demoable) without the copyrighted art. The static layer is a stylized face as **linework** — a
-//! head outline, two eyes, and a smile — NOT a filled disk: a filled disk would paint a solid blob
-//! and (under the shader's `max` compositing) hide the rotating ring entirely. The text layer is a
-//! toothed ring whose rotation is visible through the open linework. Each atlas is RGBA8 with the
-//! signed distance in every channel, so the shader's `median(r, g, b)` recovers it (0.5 = edge).
-//! Real Phase 2 bakes drop in via [`load_atlas`].
-#![allow(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+//! A procedural stand-in for the Laughing Man logo MSDF atlases, so the compositor runs without the
+//! copyrighted art: a **linework** face (outline + eyes + smile, NOT a filled disk that would hide the
+//! ring) as the static layer, a toothed ring as the text layer. RGBA8, distance per channel (median, 0.5 = edge).
 
 use std::path::Path;
 
 use anyhow::Context as _;
 
-/// An all-outside (fully transparent) MSDF atlas — every channel encodes "far outside" (0), so it
-/// contributes nothing to the composite. Used for the unused text layer when only a single combined
-/// logo atlas is supplied.
+use crate::num::Cast as _;
+
+/// An all-outside (fully transparent) MSDF atlas — contributes nothing; used for the unused text layer.
 #[must_use]
 pub fn blank_atlas(size: u32) -> Vec<u8> {
-    vec![0u8; (size * size * 4) as usize]
+    vec![0u8; (size * size * 4).to_usize()]
 }
 
-/// Loads a baked MTSDF atlas PNG as tightly-packed RGBA8 bytes plus its (square) side length. This
-/// is the real-logo path: run `laughing-bake` on the Laughing Man SVG, then point the app at the
-/// resulting PNGs. Errors if the image is not square.
+/// Loads a baked MTSDF atlas PNG as RGBA8 bytes + its square side length. Errors if not square.
 pub fn load_atlas(path: &Path) -> anyhow::Result<(Vec<u8>, u32)> {
     let img = image::open(path)
         .with_context(|| format!("opening atlas {}", path.display()))?
@@ -38,21 +31,16 @@ fn median_u8(r: u8, g: u8, b: u8) -> u8 {
     r.max(g).min(r.min(g).max(b))
 }
 
-// The face disc is shrunk this much below the logo's outer radius so its white never peeks past the
-// blue outer ring. Hardcoded — the logo geometry doesn't vary at runtime.
+// The face disc is shrunk below the outer radius so its white never peeks past the blue outer ring.
 const FACE_DISC_SHRINK: f64 = 0.97;
 
-// Static-atlas alpha levels: 255 = face white where the ring shows through ("band"); this value =
-// face white that OCCLUDES the ring (the front layer, e.g. the hat); 0 = outside. The compositor
-// paints white for both non-zero levels but only draws the text where the level is the band.
+// Static alpha levels: 255 = band (ring shows through), this = white that OCCLUDES the ring (front layer),
+// 0 = outside. The compositor paints white for both non-zero levels but draws text only at the band.
 const OCCLUDER_ALPHA: u8 = 128;
-// The front coverage is morphologically closed by radius `size / this` so the cap's hollow bar/brim
-// (blue outline, open-ended) fill solid; else the ring shows through the cap's white interior.
+// Front coverage is closed by radius `size / this` so the cap's hollow brim fills solid (else the ring shows).
 const OCCLUDER_CLOSE_DIV: usize = 20;
 
-/// The filled silhouette of `coverage`: every texel not reachable by a flood-fill of the exterior
-/// from the border is enclosed by the coverage, hence interior. A one-texel barrier dilation closes
-/// sub-texel gaps in the outline so the fill can't leak inside.
+/// The filled silhouette of `coverage`: texels not reachable by an exterior flood-fill (barrier-dilated to seal gaps).
 fn silhouette_mask(coverage: &[bool], w: usize) -> Vec<bool> {
     let n = w * w;
     let barrier: Vec<bool> = (0..n)
@@ -93,9 +81,8 @@ fn silhouette_mask(coverage: &[bool], w: usize) -> Vec<bool> {
     (0..n).map(|i| !exterior[i]).collect()
 }
 
-/// The logo's face circle in texel space: centre = the deepest interior point of `mask` (BFS distance
-/// to the exterior), radius = the median ray length from that centre to the mask boundary. The median
-/// discards the cap-brim direction (a high outlier), so the circle tracks the round face, not the hat.
+/// The logo's face circle in texel space: centre = deepest interior point (BFS), radius = median ray to
+/// the boundary. The median discards the cap-brim outlier, so the circle tracks the face, not the hat.
 fn face_circle(mask: &[bool], w: usize) -> (f64, f64, f64) {
     let n = w * w;
     let mut dist = vec![u32::MAX; n];
@@ -107,11 +94,11 @@ fn face_circle(mask: &[bool], w: usize) -> (f64, f64, f64) {
         }
     }
     while let Some(i) = q.pop_front() {
-        let (x, y) = ((i % w) as i32, (i / w) as i32);
+        let (x, y) = ((i % w).to_i32(), (i / w).to_i32());
         for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
             let (nx, ny) = (x + dx, y + dy);
-            if nx >= 0 && ny >= 0 && nx < w as i32 && ny < w as i32 {
-                let j = ny as usize * w + nx as usize;
+            if nx >= 0 && ny >= 0 && nx < w.to_i32() && ny < w.to_i32() {
+                let j = ny.to_usize() * w + nx.to_usize();
                 if dist[j] == u32::MAX {
                     dist[j] = dist[i] + 1;
                     q.push_back(j);
@@ -120,15 +107,15 @@ fn face_circle(mask: &[bool], w: usize) -> (f64, f64, f64) {
         }
     }
     let center = (0..n).filter(|&i| mask[i]).max_by_key(|&i| dist[i]).unwrap_or(0);
-    let (cx, cy) = ((center % w) as f64, (center / w) as f64);
+    let (cx, cy) = ((center % w).to_f64(), (center / w).to_f64());
     let mut radii = Vec::with_capacity(360);
     for k in 0..360 {
         let a = f64::from(k) * std::f64::consts::PI / 180.0;
         let (dx, dy) = (a.cos(), a.sin());
         let mut r = 0.0;
         loop {
-            let (x, y) = ((cx + dx * r).round() as i32, (cy + dy * r).round() as i32);
-            if x < 0 || y < 0 || x >= w as i32 || y >= w as i32 || !mask[y as usize * w + x as usize] {
+            let (x, y) = ((cx + dx * r).round().to_i32(), (cy + dy * r).round().to_i32());
+            if x < 0 || y < 0 || x >= w.to_i32() || y >= w.to_i32() || !mask[y.to_usize() * w + x.to_usize()] {
                 break;
             }
             r += 1.0;
@@ -139,17 +126,11 @@ fn face_circle(mask: &[bool], w: usize) -> (f64, f64, f64) {
     (cx, cy, radii[radii.len() / 2])
 }
 
-/// Fills the logo's white face into the atlas's (otherwise unused) alpha channel: 255 inside, 0
-/// outside. The face is the logo silhouette sealed against a face disc — the disc closes the cap
-/// brim's open-ended outline so the brim fills solid (its hat white extends the boundary outward),
-/// and guarantees a filled face even if the outer ring has a gap. The disc is shrunk just inside the
-/// outer ring so its white never peeks past the blue.
-///
-/// Returns the face circle centre in atlas UV (0..1) — the pivot the compositor spins the text ring
-/// around. It is offset from the atlas centre because the cap brim shifts the fit, so rotating the
-/// ring about (0.5, 0.5) would make it wobble.
+/// Fills the logo's white face into the atlas alpha (255 inside, 0 outside): the silhouette sealed
+/// against a shrunk face disc, so the cap brim fills solid and a filled face is guaranteed. Returns the
+/// face-circle centre in atlas UV — the pivot the compositor spins the ring around (off-centre due to the brim).
 pub fn stamp_silhouette(rgba: &mut [u8], size: u32) -> (f32, f32) {
-    let w = size as usize;
+    let w = size.to_usize();
     let n = w * w;
     let coverage: Vec<bool> = (0..n)
         .map(|i| median_u8(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]) > 127)
@@ -160,7 +141,7 @@ pub fn stamp_silhouette(rgba: &mut [u8], size: u32) -> (f32, f32) {
     // Seal: union the coverage with the shrunk face disc, then re-fill.
     let mut sealed = coverage;
     for (i, cell) in sealed.iter_mut().enumerate() {
-        let (x, y) = ((i % w) as f64, (i / w) as f64);
+        let (x, y) = ((i % w).to_f64(), (i / w).to_f64());
         if (x - cx).hypot(y - cy) <= rs {
             *cell = true;
         }
@@ -169,7 +150,7 @@ pub fn stamp_silhouette(rgba: &mut [u8], size: u32) -> (f32, f32) {
     for i in 0..n {
         rgba[i * 4 + 3] = if face[i] { 255 } else { 0 };
     }
-    (cx as f32 / size as f32, cy as f32 / size as f32)
+    (cx.to_f32() / size.to_f32(), cy.to_f32() / size.to_f32())
 }
 
 // Separable square dilation of a boolean mask by radius `k` (out-of-bounds treated as unset).
@@ -204,15 +185,11 @@ fn erode(m: &[bool], w: usize, k: usize) -> Vec<bool> {
         .collect()
 }
 
-/// Marks where the front layer occludes the rotating text: downgrades the static face alpha from the
-/// band level (255) to [`OCCLUDER_ALPHA`] wherever the front layer's solid region covers it, so the
-/// compositor keeps painting white there but stops drawing the text (the front reads as in front of
-/// the ring). The front region is its coverage morphologically *closed*, so the cap's hollow bar/brim
-/// fill solid (their blue outline is open-ended, so a flood-fill silhouette misses the interior).
-/// `front_rgba` is the baked front atlas, read for its coverage only. Call after [`stamp_silhouette`]
-/// on the static atlas; both atlases must share the same frame and size.
+/// Downgrades the static face alpha from band (255) to [`OCCLUDER_ALPHA`] wherever the front layer covers
+/// it, so the compositor keeps white but stops the text there (front reads in front of the ring). Front
+/// coverage is morphologically closed. Call after [`stamp_silhouette`]; both atlases share frame + size.
 pub fn apply_occluder(static_rgba: &mut [u8], front_rgba: &[u8], size: u32) {
-    let w = size as usize;
+    let w = size.to_usize();
     let n = w * w;
     let coverage: Vec<bool> = (0..n)
         .map(|i| median_u8(front_rgba[i * 4], front_rgba[i * 4 + 1], front_rgba[i * 4 + 2]) > 127)
@@ -226,30 +203,27 @@ pub fn apply_occluder(static_rgba: &mut [u8], front_rgba: &[u8], size: u32) {
     }
 }
 
-/// Encodes a signed distance `d` (texels, positive inside) as a `[0, 255]` MSDF channel: 128 at the
-/// edge, spread over `range` texels.
+/// Encodes a signed distance `d` (texels, positive inside) as a `[0,255]` MSDF channel (128 = edge, over `range`).
 fn encode(d: f32, range: f32) -> u8 {
-    ((0.5 + d / range).clamp(0.0, 1.0) * 255.0).round() as u8
+    ((0.5 + d / range).clamp(0.0, 1.0) * 255.0).round().to_u8()
 }
 
 // Fills `size`×`size` RGBA8 by evaluating a positive-inside signed distance per texel.
 fn field(size: u32, range: f32, sdf: impl Fn(f32, f32) -> f32) -> Vec<u8> {
-    let mut out = Vec::with_capacity((size * size * 4) as usize);
+    let mut out = Vec::with_capacity((size * size * 4).to_usize());
     for y in 0..size {
         for x in 0..size {
-            let v = encode(sdf(x as f32 + 0.5, y as f32 + 0.5), range);
+            let v = encode(sdf(x.to_f32() + 0.5, y.to_f32() + 0.5), range);
             out.extend_from_slice(&[v, v, v, v]);
         }
     }
     out
 }
 
-// A stroked-ring signed distance: positive within `half_thickness` of `radius`.
 fn ring_band(dist: f32, radius: f32, half_thickness: f32) -> f32 {
     half_thickness - (dist - radius).abs()
 }
 
-// A filled-disc signed distance centered at (cx, cy).
 fn disc(x: f32, y: f32, cx: f32, cy: f32, r: f32) -> f32 {
     r - (x - cx).hypot(y - cy)
 }
@@ -257,7 +231,7 @@ fn disc(x: f32, y: f32, cx: f32, cy: f32, r: f32) -> f32 {
 /// A stylized face as linework: head outline + two eyes + a smile — the static layer.
 #[must_use]
 pub fn synthetic_static(size: u32, range: f32) -> Vec<u8> {
-    let s = size as f32;
+    let s = size.to_f32();
     let c = s * 0.5;
     let t = s * 0.025; // linework half-thickness
     let eye_r = s * 0.05;
@@ -280,7 +254,7 @@ pub fn synthetic_static(size: u32, range: f32) -> Vec<u8> {
 /// reads as motion — the text layer.
 #[must_use]
 pub fn synthetic_text(size: u32, range: f32, teeth: u32) -> Vec<u8> {
-    let s = size as f32;
+    let s = size.to_f32();
     let c = s * 0.5;
     let r_outer = s * 0.40;
     let r_inner = s * 0.30;
@@ -288,7 +262,7 @@ pub fn synthetic_text(size: u32, range: f32, teeth: u32) -> Vec<u8> {
         let (dx, dy) = (x - c, y - c);
         let dist = (dx * dx + dy * dy).sqrt();
         let ring = (r_outer - dist).min(dist - r_inner);
-        if (dy.atan2(dx) * teeth as f32).sin() > 0.0 {
+        if (dy.atan2(dx) * teeth.to_f32()).sin() > 0.0 {
             ring
         } else {
             -range
@@ -299,14 +273,14 @@ pub fn synthetic_text(size: u32, range: f32, teeth: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{synthetic_static, synthetic_text};
+    use crate::num::Cast as _;
 
     const SIZE: u32 = 64;
     const RANGE: f32 = 8.0;
 
     #[test]
     fn apply_occluder_closes_the_hollow_cap_and_downgrades_the_alpha() {
-        let n = (SIZE * SIZE) as usize;
-        // Static: the whole atlas is band-level white (alpha 255).
+        let n = (SIZE * SIZE).to_usize();
         let mut static_rgba = vec![0u8; n * 4];
         for i in 0..n {
             static_rgba[i * 4 + 3] = 255;
@@ -315,34 +289,31 @@ mod tests {
         let mut front = vec![0u8; n * 4];
         for x in 16..48u32 {
             for y in [28u32, 36] {
-                let i = ((y * SIZE + x) * 4) as usize;
+                let i = ((y * SIZE + x) * 4).to_usize();
                 front[i] = 255;
                 front[i + 1] = 255;
                 front[i + 2] = 255;
             }
         }
         super::apply_occluder(&mut static_rgba, &front, SIZE);
-        let alpha = |x: u32, y: u32| static_rgba[((y * SIZE + x) * 4 + 3) as usize];
-        // The close bridges the 8px gap, so the hollow bar's interior occludes the ring...
+        let alpha = |x: u32, y: u32| static_rgba[((y * SIZE + x) * 4 + 3).to_usize()];
+        // The close bridges the 8px gap → the hollow interior occludes the ring; well outside stays band.
         assert_eq!(alpha(32, 32), super::OCCLUDER_ALPHA, "hollow interior is occluded");
-        // ...while well outside the bar stays band-level (ring shows).
         assert_eq!(alpha(4, 4), 255, "far from the front stays band");
     }
 
     // The MSDF value at texel (x, y) as a fraction (all channels equal here, so channel 0 is it).
     fn value_at(buf: &[u8], x: u32, y: u32) -> f32 {
-        f32::from(buf[((y * SIZE + x) * 4) as usize]) / 255.0
+        f32::from(buf[((y * SIZE + x) * 4).to_usize()]) / 255.0
     }
 
     #[test]
     fn static_face_is_open_at_the_center_and_solid_on_the_linework() {
         let buf = synthetic_static(SIZE, RANGE);
-        assert_eq!(buf.len(), (SIZE * SIZE * 4) as usize);
-        // The center is background (open), NOT a filled blob — this is the whole point.
+        assert_eq!(buf.len(), (SIZE * SIZE * 4).to_usize());
+        // Center is open (NOT a filled blob), the head outline and an eye are drawn.
         assert!(value_at(&buf, SIZE / 2, SIZE / 2) < 0.5, "center is open");
-        // A point on the head outline ring (radius 0.46·64 ≈ 29 from center, at x = 61) is inside.
         assert!(value_at(&buf, 61, SIZE / 2) > 0.5, "head outline is drawn");
-        // An eye (center ≈ (22, 28)) is inside.
         assert!(value_at(&buf, 22, 28) > 0.5, "eye is drawn");
     }
 
@@ -358,12 +329,10 @@ mod tests {
 
     #[test]
     fn silhouette_fills_the_interior_enclosed_by_linework() {
-        // The synthetic face's head is a closed ring: flood-fill can't reach its open center, so the
-        // silhouette (stamped into alpha) fills that interior — exactly the "white face" the shader
-        // paints — while a far corner outside the head stays exterior.
+        // The head is a closed ring: flood-fill can't reach the open center, so the silhouette fills it (the "white face").
         let mut buf = super::synthetic_static(SIZE, RANGE);
         super::stamp_silhouette(&mut buf, SIZE);
-        let alpha = |x: u32, y: u32| buf[((y * SIZE + x) * 4 + 3) as usize];
+        let alpha = |x: u32, y: u32| buf[((y * SIZE + x) * 4 + 3).to_usize()];
         assert_eq!(alpha(SIZE / 2, SIZE / 2), 255, "enclosed center is filled silhouette");
         assert_eq!(alpha(1, 1), 0, "far corner is exterior");
     }
@@ -376,13 +345,12 @@ mod tests {
         let (w, _h) = img.dimensions();
         let mut buf = img.into_raw();
         let (px, py) = super::stamp_silhouette(&mut buf, w);
-        let n = (w * w) as usize;
+        let n = (w * w).to_usize();
         let filled = (0..n).filter(|&i| buf[i * 4 + 3] > 127).count();
-        let frac = filled as f64 / n as f64;
-        let center = buf[(((w / 2) * w + w / 2) * 4 + 3) as usize];
+        let frac = filled.to_f64() / n.to_f64();
+        let center = buf[(((w / 2) * w + w / 2) * 4 + 3).to_usize()];
         eprintln!("silhouette: {:.1}% filled, center alpha={center}, ring pivot=({px:.3}, {py:.3})", frac * 100.0);
-        // A sane logo silhouette fills a meaningful region but neither nothing (no enclosure) nor the
-        // whole atlas (the fill leaked through the outline).
+        // A sane silhouette fills a meaningful region — neither nothing (no enclosure) nor the whole atlas (a leak).
         assert!((0.2..0.9).contains(&frac), "silhouette fraction {frac}: no-fill or a leak");
         assert_eq!(center, 255, "the logo center is enclosed → filled");
         // The cap brim shifts the fit, so the circle centre (the ring pivot) is off the atlas centre.
