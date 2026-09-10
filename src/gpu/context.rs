@@ -1,12 +1,5 @@
-//! Vulkan context: an instance with the surface extensions, the window surface, a physical device
-//! whose queue family supports graphics + present, a logical device with dynamic rendering and the
-//! swapchain extension, the queue, and a command pool.
+//! Vulkan context: instance, surface, graphics+present device (dynamic rendering + swapchain), queue, command pool.
 #![allow(unsafe_code)]
-#![allow(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
 
 use std::ffi::{CStr, c_void};
 
@@ -15,14 +8,13 @@ use ash::vk;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
-// The Khronos validation layer, enabled in debug builds when installed.
+use crate::num::Cast as _;
+
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
-/// Owns the Vulkan objects the presenter binds against. Dropped in reverse creation order.
 pub struct VkContext {
     _entry: ash::Entry,
     pub instance: ash::Instance,
-    // The validation debug messenger (debug builds with the layer installed), destroyed first.
     debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     pub surface_loader: ash::khr::surface::Instance,
     pub surface: vk::SurfaceKHR,
@@ -34,8 +26,6 @@ pub struct VkContext {
 }
 
 impl VkContext {
-    /// Brings up Vulkan for `window`: loader → instance (+ surface exts) → surface → device with a
-    /// graphics+present queue and dynamic rendering → command pool.
     pub fn new(window: &Window, app_name: &CStr) -> anyhow::Result<Self> {
         // SAFETY: `Entry::load` dynamically links the system Vulkan loader; `Err` if absent.
         let entry = unsafe { ash::Entry::load() }.context("loading the Vulkan loader")?;
@@ -67,8 +57,7 @@ impl VkContext {
             None
         };
 
-        // SAFETY: handles come from `window`, valid for the surface's lifetime (the window outlives
-        // the context in `present`).
+        // SAFETY: handles come from `window`, valid for the surface's lifetime (window outlives context).
         let surface = unsafe {
             ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)
         }
@@ -119,7 +108,6 @@ impl VkContext {
     }
 }
 
-/// True if the Khronos validation layer is installed (so it can be requested).
 fn validation_layer_present(entry: &ash::Entry) -> bool {
     // SAFETY: `entry` is a live loader.
     let Ok(layers) = (unsafe { entry.enumerate_instance_layer_properties() }) else {
@@ -132,8 +120,7 @@ fn validation_layer_present(entry: &ash::Entry) -> bool {
     })
 }
 
-/// Creates a debug messenger that prints validation warnings/errors to stderr. `None` if creation
-/// fails (validation then simply stays silent rather than aborting startup).
+/// Creates a debug messenger printing validation warnings/errors to stderr; `None` if creation fails.
 fn setup_debug_messenger(
     entry: &ash::Entry,
     instance: &ash::Instance,
@@ -155,8 +142,7 @@ fn setup_debug_messenger(
     Some((loader, messenger))
 }
 
-/// Validation-layer callback: prints each message to stderr. Always returns `FALSE` (do not abort
-/// the offending call).
+/// Validation-layer callback: prints each message to stderr; always returns `FALSE`.
 unsafe extern "system" fn debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     _types: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -169,8 +155,7 @@ unsafe extern "system" fn debug_callback(
     vk::FALSE
 }
 
-/// Picks a physical device and a queue-family index supporting both graphics and present on
-/// `surface`. Prefers a discrete GPU, else takes the first match.
+/// Picks a physical device + queue-family with graphics+present on `surface`; prefers a discrete GPU.
 fn select_device(
     instance: &ash::Instance,
     surface_loader: &ash::khr::surface::Instance,
@@ -186,7 +171,7 @@ fn select_device(
         let families =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         for (index, family) in families.iter().enumerate() {
-            let family_index = index as u32;
+            let family_index = index.to_u32();
             if !family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 continue;
             }

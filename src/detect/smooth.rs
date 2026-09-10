@@ -1,7 +1,5 @@
-//! One Euro filter (Casiez, Roussel, Vogel — CHI 2012): a speed-adaptive low-pass. Its cutoff rises
-//! with the estimated speed (`cutoff = min_cutoff + beta·|ẋ|`), so it removes jitter at rest yet
-//! barely lags fast motion — which a fixed-cutoff filter (EMA) cannot. Used to smooth the landmark
-//! and box coordinates the overlay's rotation/placement come from.
+//! One Euro filter (Casiez et al., CHI 2012): a speed-adaptive low-pass — cutoff rises with speed
+//! (`min_cutoff + beta·|ẋ|`), killing rest jitter without lagging fast motion. Smooths landmarks/box.
 
 use std::f32::consts::PI;
 
@@ -31,8 +29,7 @@ impl OneEuro {
         }
     }
 
-    /// Filters sample `x` observed `dt` seconds after the previous one. The first sample passes
-    /// through unchanged (no history yet).
+    /// Filters `x` observed `dt` seconds after the previous sample; the first passes through.
     pub fn filter(&mut self, x: f32, dt: f32) -> f32 {
         let Some(xp) = self.x_prev else {
             self.x_prev = Some(x);
@@ -79,22 +76,21 @@ impl OneEuroPoint {
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_precision_loss, clippy::as_conversions)]
 mod tests {
     use super::OneEuro;
+    use crate::num::Cast as _;
 
     const DT: f32 = 1.0 / 30.0;
 
     fn variance(xs: &[f32]) -> f32 {
-        let n = xs.len() as f32;
+        let n = xs.len().to_f32();
         let mean = xs.iter().sum::<f32>() / n;
         xs.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n
     }
 
     #[test]
     fn suppresses_jitter_on_a_static_signal() {
-        // A static 100 with ±10 jitter. The filtered output's variance (after warmup) is far below
-        // the input's — the point of the smoothing layer.
+        // Static 100 ±10 jitter: filtered variance (post-warmup) is far below the input's.
         let mut f = OneEuro::new(1.0, 0.0);
         let inputs: Vec<f32> = (0..60).map(|i| if i % 2 == 0 { 110.0 } else { 90.0 }).collect();
         let outputs: Vec<f32> = inputs.iter().map(|&x| f.filter(x, DT)).collect();
@@ -105,15 +101,13 @@ mod tests {
 
     #[test]
     fn tracks_a_ramp_with_little_lag_unlike_a_fixed_lowpass() {
-        // A constant-velocity ramp. One Euro's speed adaptation (beta > 0) tracks it with small
-        // steady-state lag; a fixed low-pass (beta = 0, ≈ EMA) lags far more — the property the plan
-        // calls out ("which EMA would fail").
+        // Constant-velocity ramp: One Euro (beta>0) tracks with small lag; a fixed low-pass lags far more.
         let v = 300.0; // px/s
         let mut euro = OneEuro::new(1.0, 0.5);
         let mut fixed = OneEuro::new(1.0, 0.0);
         let (mut euro_err, mut fixed_err) = (0.0, 0.0);
         for i in 0..120 {
-            let x = v * (i as f32) * DT;
+            let x = v * i.to_f32() * DT;
             euro_err = (x - euro.filter(x, DT)).abs();
             fixed_err = (x - fixed.filter(x, DT)).abs();
         }

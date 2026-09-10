@@ -1,68 +1,67 @@
-//! Command-line arguments: the webcam source, an optional requested resolution, device enumeration,
-//! the headless probe, the test-pattern demo, and (with the `detect` feature) a SCRFD model path.
-
 use std::path::PathBuf;
 
 use clap::Parser;
 
-/// Overlay the Laughing Man logo on faces in a webcam or video stream.
 #[derive(Parser, Debug)]
-#[command(name = "laughing-man", version, about)]
+#[command(
+    name = "laughing-man",
+    version,
+    about = "Overlay the Laughing Man logo on faces in a webcam or video stream."
+)]
 pub struct Cli {
-    /// Webcam device index to capture from.
-    #[arg(short, long, default_value_t = 0)]
+    #[arg(short, long, default_value_t = 0, help = "Webcam device index to capture from.")]
     pub source: u32,
 
-    /// Requested capture resolution, e.g. `1280x720`. Defaults to the camera's highest.
-    #[arg(long, value_parser = parse_size)]
+    #[arg(
+        long,
+        value_parser = parse_size,
+        help = "Requested capture resolution, e.g. `1280x720`. Defaults to the camera's highest."
+    )]
     pub size: Option<(u32, u32)>,
 
-    /// List available capture devices and exit.
-    #[arg(long)]
+    #[arg(long, help = "List available capture devices and exit.")]
     pub list: bool,
 
-    /// Print capture dimensions and the measured rate to stdout instead of opening a window.
-    #[arg(long)]
+    #[arg(long, help = "Print capture dimensions and the measured rate to stdout instead of opening a window.")]
     pub probe: bool,
 
-    /// Decode this video file (mp4/mkv/…) as the frame source instead of the webcam. ffmpeg is
-    /// auto-downloaded on first use if not installed.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Decode this video file (mp4/mkv/…) as the frame source instead of the webcam. ffmpeg is auto-downloaded on first use if not installed."
+    )]
     pub video: Option<PathBuf>,
 
-    /// Present a synthetic scrolling test pattern instead of the webcam (no camera needed).
-    #[arg(long)]
+    #[arg(long, help = "Present a synthetic scrolling test pattern instead of the webcam (no camera needed).")]
     pub test_pattern: bool,
 
-    /// Exit after presenting this many frames (for smoke tests); default runs until the window closes.
-    #[arg(long)]
+    #[arg(long, help = "Exit after presenting this many frames (for smoke tests); default runs until the window closes.")]
     pub present_frames: Option<u32>,
 
-    /// Path to a SCRFD `*_kps` ONNX model (requires the `detect` feature). Without it, a synthetic
-    /// demo face drives the overlay.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Path to a SCRFD `*_kps` ONNX model (requires the `detect` feature). Without it, a synthetic demo face drives the overlay."
+    )]
     pub model: Option<PathBuf>,
 
-    /// Baked static-layer MTSDF PNG (from `laughing-bake`). Given with `--logo-text`, the real logo
-    /// is composited; otherwise a procedural placeholder is used.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Baked static-layer MTSDF PNG (from `laughing-bake`). Given with `--logo-text`, the real logo is composited; otherwise a procedural placeholder is used."
+    )]
     pub logo_static: Option<PathBuf>,
 
-    /// Baked text-ring MTSDF PNG (from `laughing-bake`).
-    #[arg(long)]
+    #[arg(long, help = "Baked text-ring MTSDF PNG (from `laughing-bake`).")]
     pub logo_text: Option<PathBuf>,
 
-    /// Baked front-layer MTSDF PNG (features + cap). Its silhouette occludes the rotating text ring
-    /// so the hat reads as in front of it. Only its alpha is used, at load; not uploaded.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Baked front-layer MTSDF PNG (features + cap). Its silhouette occludes the rotating text ring so the hat reads as in front of it. Only its alpha is used, at load; not uploaded."
+    )]
     pub logo_front: Option<PathBuf>,
 
-    /// Number of frames to sample when measuring the capture rate.
-    #[arg(long, default_value_t = 120)]
+    #[arg(long, default_value_t = 120, help = "Number of frames to sample when measuring the capture rate.")]
     pub frames: u32,
 }
 
-/// Parses a `WIDTHxHEIGHT` string (e.g. `640x480`) into a `(width, height)` pair.
 fn parse_size(raw: &str) -> Result<(u32, u32), String> {
     let (w, h) = raw
         .split_once(['x', 'X'])

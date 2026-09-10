@@ -1,16 +1,10 @@
-//! Minimal Vulkan resources for the presenter: a host-visible buffer (frame staging), a
-//! device-local sampled image (the frame texture), a linear/clamp sampler, and an image-layout
-//! transition helper. Adapted from Aspire vk-run's `memory.rs`, simplified to this app's needs.
+//! Minimal Vulkan presenter resources (staging buffer, sampled image, sampler, layout transition), simplified from Aspire vk-run's `memory.rs`.
 #![allow(unsafe_code)]
-#![allow(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::too_many_arguments
-)]
 
 use anyhow::{Context as _, anyhow};
 use ash::vk;
+
+use crate::num::Cast as _;
 
 /// A host-visible, host-coherent buffer. Frees buffer then memory on drop.
 pub struct Buffer {
@@ -211,37 +205,37 @@ impl Drop for Sampler {
     }
 }
 
+/// A color-image layout transition: old/new layouts plus src/dst pipeline-stage and access scopes.
+pub struct Transition {
+    pub old_layout: vk::ImageLayout,
+    pub new_layout: vk::ImageLayout,
+    pub src_stage: vk::PipelineStageFlags,
+    pub dst_stage: vk::PipelineStageFlags,
+    pub src_access: vk::AccessFlags,
+    pub dst_access: vk::AccessFlags,
+}
+
 /// Records a color-image layout transition into `cmd` via a classic pipeline barrier.
-pub fn transition_image(
-    device: &ash::Device,
-    cmd: vk::CommandBuffer,
-    image: vk::Image,
-    old_layout: vk::ImageLayout,
-    new_layout: vk::ImageLayout,
-    src_stage: vk::PipelineStageFlags,
-    dst_stage: vk::PipelineStageFlags,
-    src_access: vk::AccessFlags,
-    dst_access: vk::AccessFlags,
-) {
+pub fn transition_image(device: &ash::Device, cmd: vk::CommandBuffer, image: vk::Image, t: &Transition) {
     let range = vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .level_count(1)
         .layer_count(1);
     let barrier = vk::ImageMemoryBarrier::default()
-        .old_layout(old_layout)
-        .new_layout(new_layout)
+        .old_layout(t.old_layout)
+        .new_layout(t.new_layout)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(image)
         .subresource_range(range)
-        .src_access_mask(src_access)
-        .dst_access_mask(dst_access);
+        .src_access_mask(t.src_access)
+        .dst_access_mask(t.dst_access);
     // SAFETY: `cmd` is recording; `image` is live; the barrier array outlives the call.
     unsafe {
         device.cmd_pipeline_barrier(
             cmd,
-            src_stage,
-            dst_stage,
+            t.src_stage,
+            t.dst_stage,
             vk::DependencyFlags::empty(),
             &[],
             &[],
@@ -258,12 +252,11 @@ fn find_memory_type(
 ) -> Option<u32> {
     (0..props.memory_type_count).find(|&i| {
         let allowed = type_bits & (1 << i) != 0;
-        allowed && props.memory_types[i as usize].property_flags.contains(flags)
+        allowed && props.memory_types[i.to_usize()].property_flags.contains(flags)
     })
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::find_memory_type;
     use ash::vk;
@@ -271,11 +264,12 @@ mod tests {
     #[test]
     fn finds_first_allowed_type_with_flags() {
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE;
+        // ash structs have private padding, so they can't be built with a literal — default + set.
         let mut props = vk::PhysicalDeviceMemoryProperties::default();
-        props.memory_type_count = 3;
         props.memory_types[0].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
         props.memory_types[1].property_flags = host;
         props.memory_types[2].property_flags = host;
+        props.memory_type_count = 3;
         assert_eq!(find_memory_type(&props, 0b111, host), Some(1));
         assert_eq!(find_memory_type(&props, 0b001, host), None);
         assert_eq!(find_memory_type(&props, 0b100, host), Some(2));
