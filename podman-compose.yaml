@@ -1,0 +1,38 @@
+# podman-compose.yaml — build + run laughing-man under Podman.
+#
+#   podman-compose up --build      # build the image and run the live webcam window
+#   podman-compose run --rm laughing-man --list     # override args (list capture devices)
+#
+# laughing-man is a GPU + webcam + windowed app, so the container is given host access to:
+#   - the GPU        (/dev/dri, for real Vulkan; the image also carries lavapipe as a fallback)
+#   - the webcam      (/dev/video0 — change the index to match your camera / --source)
+#   - the X11 display (the socket + DISPLAY; run `xhost +local:` first, or use xauth)
+#   - audio           (PulseAudio/PipeWire socket, for the --video path's soundtrack)
+#
+# Wayland instead of X11: drop the X11 volume/DISPLAY, mount $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY
+# and set WAYLAND_DISPLAY. Headless smoke tests (`--probe`, `--list`) need none of this.
+services:
+  laughing-man:
+    build:
+      context: .
+      dockerfile: Containerfile
+      # Aspire path deps live in the sibling repo, supplied as a named build context.
+      additional_contexts:
+        aspire: ../Aspire
+    image: laughing-man:latest
+    # X11 apps expect the abstract-socket namespace of the host.
+    ipc: host
+    devices:
+      - /dev/dri:/dev/dri        # GPU render nodes (Vulkan)
+      - /dev/video0:/dev/video0  # webcam
+    group_add:
+      - video
+    environment:
+      DISPLAY: ${DISPLAY:-:0}
+      # Route audio to the host sound server (PulseAudio/PipeWire).
+      PULSE_SERVER: unix:${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native:${XDG_RUNTIME_DIR:-/run/user/1000}/pulse/native:rw
+      # Mount a host folder here to feed `--video /media/<clip>.mp4`.
+      - ./media:/media:ro

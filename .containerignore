@@ -1,0 +1,12 @@
+# Keep the build context (this repo) small and the image reproducible.
+# Cargo.lock is intentionally NOT ignored — the build uses --locked.
+target/
+**/target/
+.git/
+.github/
+.claude/
+assets/**/*.mp4
+*.md
+!README.md
+.release_gate.toml
+.gitignore
