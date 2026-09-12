@@ -1,0 +1,62 @@
+project = "LaughingMan"
+schema  = 1
+
+# Overlay: tighten the three fleet-default maintainability metrics from advisory (warn) to blocker
+# (error) for this repo. Same ids as release_gate's built-in defaults, so these override them
+# (INSERT OR REPLACE, overlay layered last). Only the gate changes; thresholds match the defaults.
+
+[[control]]
+id        = "LaughingMan::default.comment-ratio"
+title     = "No source file over the 10% comment-line cap"
+assertion = "release_gate maintainability metric, promoted to blocker for LaughingMan."
+theme     = "maintainability"
+gate      = "blocker"
+severity  = "low"
+[control.check]
+kind      = "complexity"
+metric    = "comment_ratio"
+scope     = "file_worst"
+files     = ["src", "crates"]
+predicate = "<= 0.10"
+
+[[control]]
+id        = "LaughingMan::default.cyclomatic"
+title     = "No function over cyclomatic complexity 20"
+assertion = "release_gate maintainability metric, promoted to blocker for LaughingMan."
+theme     = "maintainability"
+gate      = "blocker"
+severity  = "low"
+[control.check]
+kind      = "complexity"
+metric    = "cyclomatic"
+scope     = "file_worst"
+files     = ["src", "crates"]
+predicate = "<= 20"
+
+[[control]]
+id        = "LaughingMan::default.file-length"
+title     = "No source file over 800 lines"
+assertion = "release_gate maintainability metric, promoted to blocker for LaughingMan."
+theme     = "maintainability"
+gate      = "blocker"
+severity  = "low"
+[control.check]
+kind      = "complexity"
+metric    = "loc"
+scope     = "file_worst"
+files     = ["src", "crates"]
+predicate = "<= 800"
+
+[[control]]
+id = "laughingman.coverage.line-floor"
+title = "Rust source files meet the configured coverage floor"
+assertion = "Bulwark reports every listed Rust source file at or above this repository's configured line-coverage floor."
+theme = "supply_chain"
+gate = "advisory"
+severity = "medium"
+evidence = ["bulwark config.toml"]
+
+[control.check]
+kind = "coverage"
+files = []
+floor = 80.0
