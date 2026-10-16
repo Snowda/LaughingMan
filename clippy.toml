@@ -3,3 +3,13 @@
 allow-expect-in-tests = true
 allow-unwrap-in-tests = true
 allow-panic-in-tests = true
+
+# Env vars come from Barrel (C:/Git/Barrel): read them through barrel_client, never std::env.
+disallowed-methods = [
+    { path = "std::env::var", reason = "read Barrel-injected config via barrel_client (C:/Git/Barrel/crates/barrel-client), not std::env" },
+    { path = "std::env::var_os", reason = "read Barrel-injected config via barrel_client (C:/Git/Barrel/crates/barrel-client), not std::env" },
+    { path = "std::env::vars", reason = "read Barrel-injected config via barrel_client (C:/Git/Barrel/crates/barrel-client), not std::env" },
+    { path = "std::env::vars_os", reason = "read Barrel-injected config via barrel_client (C:/Git/Barrel/crates/barrel-client), not std::env" },
+    { path = "std::env::set_var", reason = "the process env is Barrel-owned; inject via `barrel run`, do not mutate it" },
+    { path = "std::env::remove_var", reason = "the process env is Barrel-owned; inject via `barrel run`, do not mutate it" },
+]
