@@ -1,9 +1,3 @@
-# `unwrap`/`expect`/`panic` are denied in production (see Cargo.toml [lints.clippy]), but are the
-# idiomatic way to assert in tests — exempt test code rather than scatter per-module `#[allow]`s.
-allow-expect-in-tests = true
-allow-unwrap-in-tests = true
-allow-panic-in-tests = true
-
 # Env vars come from Barrel (C:/Git/Barrel): read them through barrel_client, never std::env.
 disallowed-methods = [
     { path = "std::env::var", reason = "read Barrel-injected config via barrel_client (C:/Git/Barrel/crates/barrel-client), not std::env" },
@@ -12,4 +6,13 @@ disallowed-methods = [
     { path = "std::env::vars_os", reason = "read Barrel-injected config via barrel_client (C:/Git/Barrel/crates/barrel-client), not std::env" },
     { path = "std::env::set_var", reason = "the process env is Barrel-owned; inject via `barrel run`, do not mutate it" },
     { path = "std::env::remove_var", reason = "the process env is Barrel-owned; inject via `barrel run`, do not mutate it" },
+]
+
+disallowed-types = [
+    # SipHash (std's default hasher) is slow: use foldhash by default, ahash where a peer picks keys, rapidhash for stable output.
+    { path = "std::collections::HashMap", reason = "SipHash by default; use foldhash::HashMap, ahash::AHashMap or a rapidhash map" },
+    { path = "std::collections::HashSet", reason = "SipHash by default; use foldhash::HashSet, ahash::AHashSet or a rapidhash set" },
+    { path = "std::hash::RandomState", reason = "SipHash; use the foldhash, ahash or rapidhash state" },
+    { path = "std::hash::DefaultHasher", reason = "SipHash; use rapidhash::fast::RapidHasher for stable hashes" },
+    { path = "std::io::Write", reason = "use tracing instead of writing output directly" },
 ]
