@@ -3,7 +3,7 @@ name = "laughing-man"
 version = "0.1.1"
 authors = ["Conor Forde"]
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.99.1"
 repository = "https://github.com/Snowda/LaughingMan"
 description = "Overlays the Ghost in the Shell 'Laughing Man' logo on faces in webcam/video, on the GPU."
 keywords = ["laughing-man", "gits", "face-detection", "msdf", "vulkan"]
@@ -16,67 +16,73 @@ default-run = "laughing-man"
 
 [dependencies]
 # CLI parsing.
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 # Webcam capture via the native backend (Media Foundation on Windows). Raw (YUYV) frames only —
 # `default-features = false` drops nokhwa's default `decoding` feature, so no mozjpeg (IJG-licensed)
 # MJPEG decoder is pulled in.
-nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
-# Error propagation at the binary's top level.
-anyhow = "1"
+nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
+# Error propagation at the binary's top level: a derived error enum (`crate::error`).
+thiserror = "2.0.21"
 # Thin single-word refcounted RGB frame handed to the detector thread (8-byte handle, not
 # `Arc<[u8]>`'s 16). See src/gpu/present.rs `DetectionInput`.
-triomphe = "0.1"
+triomphe = "0.1.17"
+# Checked float→int conversion (`NumCast`: None on NaN/out-of-range) behind `crate::num::float_to_int`.
+num-traits = "0.2.19"
+# Packed bit masks for the silhouette flood-fill and morphology (release_gate bans `Vec<bool>`).
+bitvec = "1.1.1"
 
-# GPU shaders authored in Aspire's Rust-syntax DSL, lowered to SPIR-V at macro-expansion. `dsl` is
+# GPU shaders authored in Aspire's Rust-syntax DSL, lowered to SPIR-V at macro-expansion. `macros` is
 # the proc-macro; `aspire` carries the `ShaderModule` handle the macro emits; `spirv-reader`
 # reflects the emitted SPIR-V (entry points, descriptor bindings, fragment outputs) to drive
 # Vulkan pipeline/descriptor creation. Path deps — Aspire is checked out beside this repo.
-dsl = { path = "../Aspire/crates/dsl", version = "0.1" }
-aspire = { path = "../Aspire/crates/aspire", version = "0.1" }
-spirv-reader = { path = "../Aspire/crates/spirv-reader", version = "0.1", features = ["ash"] }
+macros = { path = "../Aspire/crates/macros", version = "0.1.2" }
+aspire = { path = "../Aspire/crates/aspire", version = "0.1.2" }
+spirv-reader = { path = "../Aspire/crates/spirv-reader", version = "0.1.2", features = ["ash"] }
 
 # Vulkan presenter: ash is the Vulkan binding; ash-window creates the surface from the winit
 # window (raw-window-handle bridges the two); winit owns the window + event loop.
-ash = "0.38"
-ash-window = "0.13"
-raw-window-handle = "0.6"
-winit = "0.30"
+ash = "0.38.0"
+ash-window = "0.13.0"
+raw-window-handle = "0.6.2"
+winit = "0.30.13"
 # PNG decode of baked MTSDF atlases loaded at runtime (and the bake's PNG output under `bake`).
-image = "0.25"
+image = "0.25.10"
+# The atlas's tEXt `msdf_range` chunk (written by the bake, read at load); `image` exposes no PNG text.
+png = "0.18.1"
 # Video-file input: wraps a standalone ffmpeg binary (auto-downloaded if absent) and decodes to raw
 # RGB frames over a pipe. No C toolchain / vendored libs — just a subprocess.
-ffmpeg-sidecar = "2.5"
+ffmpeg-sidecar = "2.7.0"
 # Audio playback of the input video's track (decodes the mp4/AAC audio via symphonia). Degrades
 # gracefully to silent video when no output device or audio stream is available.
-rodio = { version = "0.22", default-features = false, features = ["playback", "symphonia-isomp4", "symphonia-aac"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-isomp4", "symphonia-aac"] }
 
 # GPU render verification (feature `integration_tests` only): Aspire's headless Vulkan runner, used
 # to render a shader offscreen and read the pixels back. Skips cleanly when no Vulkan device exists
 # (`Gpu::new` → None). Optional so the default build never pulls ash/Vulkan.
-vk-run = { path = "../Aspire/crates/vk-run", optional = true }
+runtime = { path = "../Aspire/crates/runtime", version = "0.1.2", optional = true }
 
 # MSDF bake toolchain (feature `bake` only): fdsm generates the multi-channel SDF, usvg parses the
 # logo SVG into fillable paths, nalgebra supplies the fit transform, image writes the PNG atlas.
 # Optional + feature-gated so the runtime app (presenter) never pulls this heavier toolchain.
-fdsm = { version = "0.8", optional = true }
-usvg = { version = "0.48", optional = true }
-nalgebra = { version = "0.34", optional = true }
+fdsm = { version = "0.8.0", optional = true }
+usvg = { version = "0.48.1", optional = true }
+nalgebra = { version = "0.34.2", optional = true }
 # Independent SVG rasterizer (usvg + tiny-skia), used by the bake fidelity test to compare the MSDF
 # output against a ground-truth render of the source SVG. Version-aligned with `usvg`.
-resvg = { version = "0.48", optional = true }
+resvg = { version = "0.48.1", optional = true }
 # Data-parallel MSDF generation: the per-texel distance field is embarrassingly parallel.
-rayon = { version = "1", optional = true }
+rayon = { version = "1.12.0", optional = true }
 
 # SCRFD ONNX inference (feature `detect` only): the ort ONNX Runtime wrapper. Optional so the
 # runtime app / coverage build never pulls ONNX Runtime. `load-dynamic` loads onnxruntime.dll at
 # runtime rather than static-linking a prebuilt ORT (which mismatches the local MSVC STL, and is the
 # recommended production setup: ship the DLL alongside the app).
-ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.15", optional = true, default-features = false, features = ["load-dynamic"] }
 
 [features]
-# Compiles the GPU render tests (offscreen render + readback via vk-run). Off by default so a plain
+# Compiles the GPU render tests (offscreen render + readback via runtime). Off by default so a plain
 # `cargo test` and the coverage build stay light and need no Vulkan device.
-integration_tests = ["dep:vk-run"]
+integration_tests = ["dep:runtime"]
 # Compiles the MSDF bake toolchain (the `laughing-bake` bin + `mask` module). Off by default so the
 # runtime app build never pulls fdsm/usvg.
 bake = ["dep:fdsm", "dep:usvg", "dep:nalgebra", "dep:resvg", "dep:rayon"]
@@ -90,6 +96,11 @@ detect = ["dep:ort"]
 name = "laughing-bake"
 required-features = ["bake"]
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+overflow-checks = true
+
 [profile.coverage]
 inherits = "dev"
 opt-level = 0
@@ -99,12 +110,16 @@ debug = false
 opt-level = 0
 debug = false
 
-# Sibling-project lint conventions (mirrors Aspire's vk-run): unsafe denied crate-wide; a strict
+# Sibling-project lint conventions (mirrors Aspire's runtime): unsafe denied crate-wide; a strict
 # clippy set caught early rather than retrofitted.
 [lints.rust]
 unsafe_code = "deny"
 
 [lints.clippy]
+ref_option = "deny"
+fn_params_excessive_bools = "deny"
+missing_assert_message = "deny"
+string_add = "deny"
 float_arithmetic = "allow"
 float_cmp = "deny"
 float_cmp_const = "deny"
