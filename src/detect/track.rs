@@ -1,11 +1,12 @@
-//! Face tracking: the gap-coverage layer. A constant-velocity Kalman filter per face predicts
-//! through missed detections (coasting) so the mask never drops for a blink of the detector, greedy
-//! IoU association ties detections to tracks (ByteTrack-style: high-confidence detections birth
-//! tracks, low-confidence ones keep them alive), and a fade ramps the mask out over the last of the
-//! coast window rather than popping. Landmarks are smoothed per track with a One Euro filter.
+//! Face tracks: the layer that covers detector gaps. A constant-velocity Kalman filter per face
+//! predicts through missed detections ("coast"), so the mask does not drop when the detector blinks.
+//! Greedy IoU association ties detections to tracks in the ByteTrack style.
+//! High-confidence detections start tracks, and low-confidence ones keep them alive.
+//! A fade ramps the mask out over the last part of the coast window, so it does not pop.
+//! A One Euro filter smooths the landmarks of each track.
 //!
-//! The 8-state constant-velocity model `[cx, cy, w, h, ẋ, ẏ, ẇ, ḣ]` decouples into four independent
-//! 2-state (position, velocity) filters — one per box parameter — which [`Kf1d`] implements.
+//! The 8-state constant-velocity model `[cx, cy, w, h, ẋ, ẏ, ẇ, ḣ]` splits into four independent
+//! 2-state (position, velocity) filters, one per box parameter. [`Kf1d`] is that filter.
 
 use std::cmp::Ordering;
 
@@ -44,12 +45,12 @@ impl Kf1d {
     fn predict(&mut self, dt: f32, q_scale: f32) {
         self.p += self.v * dt;
         // P = F P Fᵀ, F = [[1, dt], [0, 1]].
-        let c00 = self.c00 + dt * self.c10 + dt * (self.c01 + dt * self.c11);
-        let c01 = self.c01 + dt * self.c11;
-        let c10 = self.c10 + dt * self.c11;
-        let c11 = self.c11;
-        // + process noise Q (white-noise acceleration), inflated by q_scale while coasting.
-        let q = self.q * q_scale;
+        let c00: f32 = self.c00 + dt * self.c10 + dt * (self.c01 + dt * self.c11);
+        let c01: f32 = self.c01 + dt * self.c11;
+        let c10: f32 = self.c10 + dt * self.c11;
+        let c11: f32 = self.c11;
+        // + process noise Q (white-noise acceleration), multiplied by q_scale during a coast.
+        let q: f32 = self.q * q_scale;
         self.c00 = c00 + q * dt * dt * dt / 3.0;
         self.c01 = c01 + q * dt * dt / 2.0;
         self.c10 = c10 + q * dt * dt / 2.0;
@@ -58,17 +59,17 @@ impl Kf1d {
 
     fn update(&mut self, z: f32) {
         // Innovation with H = [1, 0].
-        let y = z - self.p;
-        let s = self.c00 + self.r;
-        let k0 = self.c00 / s;
-        let k1 = self.c10 / s;
+        let y: f32 = z - self.p;
+        let s: f32 = self.c00 + self.r;
+        let k0: f32 = self.c00 / s;
+        let k1: f32 = self.c10 / s;
         self.p += k0 * y;
         self.v += k1 * y;
         // P = (I - K H) P, K H = [[k0, 0], [k1, 0]].
-        let c00 = (1.0 - k0) * self.c00;
-        let c01 = (1.0 - k0) * self.c01;
-        let c10 = self.c10 - k1 * self.c00;
-        let c11 = self.c11 - k1 * self.c01;
+        let c00: f32 = (1.0 - k0) * self.c00;
+        let c01: f32 = (1.0 - k0) * self.c01;
+        let c10: f32 = self.c10 - k1 * self.c00;
+        let c11: f32 = self.c11 - k1 * self.c01;
         self.c00 = c00;
         self.c01 = c01;
         self.c10 = c10;
@@ -182,8 +183,8 @@ impl Track {
     }
 }
 
-/// Multi-face tracker: constant-velocity Kalman tracks + IoU association + One Euro landmark
-/// smoothing + coast/fade lifecycle.
+/// Multi-face tracker: constant-velocity Kalman tracks, IoU association, a One Euro filter on the
+/// landmarks, and the coast/fade lifecycle.
 pub struct Tracker {
     tracks: Vec<Track>,
     next_id: u32,
@@ -200,12 +201,12 @@ impl Tracker {
         }
     }
 
-    /// Advances all tracks by `dt` seconds against this frame's `detections`, returning the confirmed
-    /// tracks (including those coasting within the fade window) for the compositor.
+    /// Advances all tracks by `dt` seconds against this frame's `detections`. Returns the confirmed
+    /// tracks for the compositor, also the tracks that coast inside the fade window.
     pub fn update(&mut self, detections: &[Detection], dt: f32) -> Vec<TrackOutput> {
-        // 1. Predict every track forward; inflate process noise while coasting.
+        // 1. Predict every track forward. Increase the process noise during a coast.
         for track in &mut self.tracks {
-            let q_scale = if track.coast_time > 0.0 {
+            let q_scale: f32 = if track.coast_time > 0.0 {
                 self.params.coast_q_scale
             } else {
                 1.0
@@ -215,37 +216,29 @@ impl Tracker {
         }
 
         // 2. Split detections by confidence (ByteTrack).
-        let high: Vec<usize> = (0..detections.len())
-            .filter(|&i| detections[i].score >= self.params.high_score)
-            .collect();
-        let low: Vec<usize> = (0..detections.len())
-            .filter(|&i| {
-                detections[i].score >= self.params.low_score
-                    && detections[i].score < self.params.high_score
-            })
-            .collect();
+        let params: TrackerParams = self.params;
+        let high = |d: &Detection| d.score >= params.high_score;
+        let low = |d: &Detection| d.score >= params.low_score && d.score < params.high_score;
 
         let mut track_matched = vec![false; self.tracks.len()];
         let mut det_matched = vec![false; detections.len()];
 
         // 3. Round 1: all tracks vs high-confidence detections.
-        self.associate_round(detections, &high, &mut track_matched, &mut det_matched, dt);
+        self.associate_round(detections, high, &mut track_matched, &mut det_matched, dt);
         // 4. Round 2: still-unmatched tracks vs low-confidence detections (keep-alive).
-        self.associate_round(detections, &low, &mut track_matched, &mut det_matched, dt);
+        self.associate_round(detections, low, &mut track_matched, &mut det_matched, dt);
 
         // 5. Birth a track for each unmatched high-confidence detection.
-        for &di in &high {
-            if !det_matched[di] {
-                self.birth(&detections[di]);
-            }
+        for (det, _) in detections.iter().zip(&det_matched).filter(|&(d, &matched)| high(d) && !matched) {
+            self.birth(det);
         }
 
         // 6. Retire tracks past the coast window.
-        let max_coast = self.params.max_coast;
+        let max_coast: f32 = self.params.max_coast;
         self.tracks.retain(|t| t.coast_time < max_coast);
 
         // 7. Emit confirmed tracks.
-        let params = self.params;
+        let params: TrackerParams = self.params;
         self.tracks
             .iter()
             .filter(|t| t.confirmed)
@@ -258,11 +251,11 @@ impl Tracker {
             .collect()
     }
 
-    // Greedily matches unmatched tracks to the given detection subset by IoU, applying each match.
+    // Matches free tracks to the detections that `in_subset` accepts, greedy by IoU, and applies each match.
     fn associate_round(
         &mut self,
         detections: &[Detection],
-        subset: &[usize],
+        in_subset: impl Fn(&Detection) -> bool,
         track_matched: &mut [bool],
         det_matched: &mut [bool],
         dt: f32,
@@ -273,12 +266,12 @@ impl Tracker {
             if track_matched[ti] {
                 continue;
             }
-            let tb = track.kf.bbox();
-            for &di in subset {
+            let tb: Bbox = track.kf.bbox();
+            for (di, det) in detections.iter().enumerate().filter(|&(_, d)| in_subset(d)) {
                 if det_matched[di] {
                     continue;
                 }
-                let score = iou(&tb, &detections[di].bbox);
+                let score: f32 = iou(&tb, &det.bbox);
                 if score >= self.params.iou_threshold {
                     pairs.push((score, ti, di));
                 }
@@ -296,7 +289,7 @@ impl Tracker {
     }
 
     fn apply_match(&mut self, ti: usize, det: &Detection, dt: f32) {
-        let track = &mut self.tracks[ti];
+        let track: &mut Track = &mut self.tracks[ti];
         track.kf.update(&det.bbox);
         for k in 0..5 {
             track.landmarks[k] = track.landmark_filters[k].filter(det.landmarks[k], dt);
@@ -309,11 +302,11 @@ impl Tracker {
     }
 
     fn birth(&mut self, det: &Detection) {
-        let id = self.next_id;
+        let id: u32 = self.next_id;
         self.next_id += 1;
-        let mut filters =
+        let mut filters: [OneEuroPoint; 5] =
             [(); 5].map(|()| OneEuroPoint::new(self.params.min_cutoff, self.params.beta));
-        let mut landmarks = det.landmarks;
+        let mut landmarks: [(f32, f32); 5] = det.landmarks;
         for k in 0..5 {
             landmarks[k] = filters[k].filter(det.landmarks[k], 1.0 / 30.0);
         }
@@ -357,13 +350,13 @@ mod tests {
 
     #[test]
     fn kf1d_predict_advances_by_velocity_and_update_pulls_to_measurement() {
-        let mut kf = Kf1d::new(0.0, 40.0, 4.0);
+        let mut kf: Kf1d = Kf1d::new(0.0, 40.0, 4.0);
         // Two measurements 1.0 apart at dt → the filter learns a positive velocity, so a predict
         // moves the position forward.
         kf.update(0.0);
         kf.predict(DT, 1.0);
         kf.update(1.0);
-        let before = kf.p;
+        let before: f32 = kf.p;
         kf.predict(DT, 1.0);
         assert!(kf.p > before, "predict advances along the learned velocity");
         assert!(kf.v > 0.0, "velocity estimated positive");
@@ -371,7 +364,7 @@ mod tests {
 
     // Drives a confirmed, constant-velocity track and returns the tracker mid-motion.
     fn confirmed_moving_tracker(v: f32) -> (Tracker, f32, f32) {
-        let mut tracker = Tracker::new(TrackerParams::default());
+        let mut tracker: Tracker = Tracker::new(TrackerParams::default());
         let (mut cx, cy) = (100.0, 100.0);
         for _ in 0..6 {
             tracker.update(&[det(cx, cy, 40.0, 40.0, 0.9)], DT);
@@ -382,13 +375,13 @@ mod tests {
 
     #[test]
     fn coasts_through_missed_detections_without_a_gap() {
-        // Track at 60 px/s, detector drops 0.2 s (< 0.4 s coast): output every frame, following truth.
-        let v = 60.0;
+        // Track at 60 px/s, detector drops 0.2 s (< 0.4 s coast). Expect output every frame, near the truth.
+        let v: f32 = 60.0;
         let (mut tracker, mut cx, cy) = confirmed_moving_tracker(v);
         for i in 0..6 {
-            let out = tracker.update(&[], DT);
+            let out: Vec<super::TrackOutput> = tracker.update(&[], DT);
             cx += v * DT;
-            assert!(!out.is_empty(), "no gap frame while coasting (frame {i})");
+            assert!(!out.is_empty(), "no gap frame during the coast (frame {i})");
             let (ox, _) = center(&out[0].bbox);
             assert!((ox - cx).abs() < 12.0, "coast tracks ground truth: {ox} vs {cx}");
             assert!(out[0].fade > 0.9, "still solid early in the coast");
@@ -398,15 +391,15 @@ mod tests {
 
     #[test]
     fn lost_track_fades_to_zero_then_is_removed() {
-        // After detections stop: fade non-increasing, drops near zero, track eventually removed.
+        // After detections stop, the fade never goes up, it drops near zero, and the track goes away.
         let (mut tracker, _, _) = confirmed_moving_tracker(0.0);
         // Fine timestep so the ~4-frame fade window resolves smoothly through the near-zero region.
-        let fine_dt = 1.0 / 120.0;
-        let mut prev_fade = 1.0f32;
-        let mut removed = false;
-        let mut min_fade = 1.0f32;
+        let fine_dt: f32 = 1.0 / 120.0;
+        let mut prev_fade: f32 = 1.0f32;
+        let mut removed: bool = false;
+        let mut min_fade: f32 = 1.0f32;
         for _ in 0..80 {
-            let out = tracker.update(&[], fine_dt);
+            let out: Vec<super::TrackOutput> = tracker.update(&[], fine_dt);
             match out.first() {
                 Some(o) => {
                     assert!(o.fade <= prev_fade + 1e-6, "fade must not increase");
@@ -426,33 +419,33 @@ mod tests {
     #[test]
     fn reacquisition_after_a_gap_does_not_jump() {
         // Coast a few frames, then the detection reappears at ground truth: the pose stays continuous.
-        let v = 60.0;
+        let v: f32 = 60.0;
         let (mut tracker, mut cx, cy) = confirmed_moving_tracker(v);
-        let mut last_coast = cx;
+        let mut last_coast: f32 = cx;
         for _ in 0..3 {
-            let out = tracker.update(&[], DT);
+            let out: Vec<super::TrackOutput> = tracker.update(&[], DT);
             cx += v * DT;
             last_coast = center(&out[0].bbox).0;
         }
         // Reappear at ground truth.
-        let out = tracker.update(&[det(cx, cy, 40.0, 40.0, 0.9)], DT);
-        let reacquired = center(&out[0].bbox).0;
+        let out: Vec<super::TrackOutput> = tracker.update(&[det(cx, cy, 40.0, 40.0, 0.9)], DT);
+        let reacquired: f32 = center(&out[0].bbox).0;
         assert!((reacquired - last_coast).abs() < 8.0, "no jump on reacquisition: {reacquired} vs {last_coast}");
     }
 
     #[test]
     fn low_confidence_alone_never_births_a_track() {
         // ByteTrack: low-confidence detections keep tracks alive but cannot start one.
-        let mut tracker = Tracker::new(TrackerParams::default());
+        let mut tracker: Tracker = Tracker::new(TrackerParams::default());
         for _ in 0..10 {
-            let out = tracker.update(&[det(100.0, 100.0, 40.0, 40.0, 0.3)], DT);
+            let out: Vec<super::TrackOutput> = tracker.update(&[det(100.0, 100.0, 40.0, 40.0, 0.3)], DT);
             assert!(out.is_empty(), "a 0.3-score detection never confirms a track");
         }
     }
 
     #[test]
     fn confirmation_needs_min_hits() {
-        let mut tracker = Tracker::new(TrackerParams::default());
+        let mut tracker: Tracker = Tracker::new(TrackerParams::default());
         // First two high-confidence frames are tentative (min_hits = 3), then it confirms.
         assert!(tracker.update(&[det(100.0, 100.0, 40.0, 40.0, 0.9)], DT).is_empty());
         assert!(tracker.update(&[det(100.0, 100.0, 40.0, 40.0, 0.9)], DT).is_empty());

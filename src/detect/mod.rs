@@ -1,6 +1,5 @@
-//! Face detection (SCRFD): pure decode (anchors, distance→box/landmarks, letterbox) and NMS
-//! live here, unit-tested; the ONNX session is behind the `detect` feature. Tracking (`track`)
-//! and smoothing (`smooth`) live alongside it.
+//! Face detection (SCRFD). The pure decode (anchors, distance→box/landmarks, letterbox) and NMS are
+//! here. The ONNX session needs the `detect` feature. `track` and `smooth` are next to it.
 
 pub mod nms;
 pub mod scrfd;
@@ -10,7 +9,7 @@ pub mod track;
 #[cfg(feature = "detect")]
 pub mod session;
 
-use crate::num::Cast as _;
+use crate::num::u32_to_f32;
 
 /// An axis-aligned face box in image pixels (top-left origin, y-down).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,7 +51,7 @@ pub struct Detection {
 /// A source of face detections for one RGB frame.
 pub trait Detector {
     /// Detects faces in a tightly-packed RGB8 frame (`width * height * 3` bytes).
-    fn detect(&mut self, rgb: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<Detection>>;
+    fn detect(&mut self, rgb: &[u8], width: u32, height: u32) -> crate::error::Result<Vec<Detection>>;
 }
 
 /// A per-frame face source for the presenter — real detector or synthetic demo. `Send` for the detect thread.
@@ -63,11 +62,11 @@ pub trait FaceProvider: Send {
         width: u32,
         height: u32,
         elapsed_secs: f32,
-    ) -> anyhow::Result<Vec<Detection>>;
+    ) -> crate::error::Result<Vec<Detection>>;
 }
 
-/// A synthetic moving, tilting face — ignores the frame and drives one face from `elapsed_secs`, so
-/// the whole detect→track→composite path (and the ring animation) is demoable with no hardware.
+/// A synthetic face that moves and tilts. It ignores the frame and sets one face from `elapsed_secs`.
+/// Thus the full detect→track→composite path and the ring animation run with no hardware.
 pub struct DemoFaceProvider;
 
 impl FaceProvider for DemoFaceProvider {
@@ -77,22 +76,22 @@ impl FaceProvider for DemoFaceProvider {
         width: u32,
         height: u32,
         elapsed_secs: f32,
-    ) -> anyhow::Result<Vec<Detection>> {
+    ) -> crate::error::Result<Vec<Detection>> {
         Ok(vec![demo_detection(width, height, elapsed_secs)])
     }
 }
 
 fn demo_detection(width: u32, height: u32, t: f32) -> Detection {
-    let (fw, fh) = (width.to_f32(), height.to_f32());
+    let (fw, fh) = (u32_to_f32(width), u32_to_f32(height));
     // Drift the face around the frame center and oscillate the head tilt (roll).
-    let cx = fw * 0.5 + fw * 0.18 * (t * 0.6).cos();
-    let cy = fh * 0.5 + fh * 0.18 * (t * 0.6).sin();
-    let size = width.min(height).to_f32() * 0.28;
-    let tilt = (t * 0.4).sin() * 0.6;
+    let cx: f32 = fw * 0.5 + fw * 0.18 * (t * 0.6).cos();
+    let cy: f32 = fh * 0.5 + fh * 0.18 * (t * 0.6).sin();
+    let size: f32 = u32_to_f32(width.min(height)) * 0.28;
+    let tilt: f32 = (t * 0.4).sin() * 0.6;
     let (ec, es) = (tilt.cos(), tilt.sin());
-    let e = size * 0.22;
-    let left_eye = (cx - e * ec, cy - e * es);
-    let right_eye = (cx + e * ec, cy + e * es);
+    let e: f32 = size * 0.22;
+    let left_eye: (f32, f32) = (cx - e * ec, cy - e * es);
+    let right_eye: (f32, f32) = (cx + e * ec, cy + e * es);
     Detection {
         bbox: Bbox {
             x1: cx - size * 0.5,
@@ -116,11 +115,11 @@ mod tests {
     use super::{DemoFaceProvider, FaceProvider};
 
     #[test]
-    fn demo_face_is_one_detection_with_ordered_eyes() -> anyhow::Result<()> {
-        let mut provider = DemoFaceProvider;
-        let dets = provider.detect_frame(&[], 640, 480, 0.0)?;
+    fn demo_face_is_one_detection_with_ordered_eyes() -> crate::error::Result<()> {
+        let mut provider: DemoFaceProvider = DemoFaceProvider;
+        let dets: Vec<super::Detection> = provider.detect_frame(&[], 640, 480, 0.0)?;
         assert_eq!(dets.len(), 1);
-        let d = dets[0];
+        let d: super::Detection = dets[0];
         assert!(d.score > 0.5);
         assert!(d.bbox.width() > 0.0 && d.bbox.height() > 0.0);
         // At t=0 the head is level: the left eye is left of the right eye at the same height.
@@ -130,16 +129,16 @@ mod tests {
     }
 
     #[test]
-    fn demo_face_moves_and_tilts_over_time() -> anyhow::Result<()> {
-        let mut provider = DemoFaceProvider;
-        let a = provider.detect_frame(&[], 640, 480, 0.0)?[0];
-        let b = provider.detect_frame(&[], 640, 480, 1.5)?[0];
-        let ca = ((a.bbox.x1 + a.bbox.x2) * 0.5, (a.bbox.y1 + a.bbox.y2) * 0.5);
-        let cb = ((b.bbox.x1 + b.bbox.x2) * 0.5, (b.bbox.y1 + b.bbox.y2) * 0.5);
+    fn demo_face_moves_and_tilts_over_time() -> crate::error::Result<()> {
+        let mut provider: DemoFaceProvider = DemoFaceProvider;
+        let a: super::Detection = provider.detect_frame(&[], 640, 480, 0.0)?[0];
+        let b: super::Detection = provider.detect_frame(&[], 640, 480, 1.5)?[0];
+        let ca: (f32, f32) = ((a.bbox.x1 + a.bbox.x2) * 0.5, (a.bbox.y1 + a.bbox.y2) * 0.5);
+        let cb: (f32, f32) = ((b.bbox.x1 + b.bbox.x2) * 0.5, (b.bbox.y1 + b.bbox.y2) * 0.5);
         assert!((ca.0 - cb.0).abs() + (ca.1 - cb.1).abs() > 1.0, "the demo face drifts");
         // The eye-line tilt (roll) differs, so the overlay's rotation animates.
-        let tilt_a = a.landmarks[1].1 - a.landmarks[0].1;
-        let tilt_b = b.landmarks[1].1 - b.landmarks[0].1;
+        let tilt_a: f32 = a.landmarks[1].1 - a.landmarks[0].1;
+        let tilt_b: f32 = b.landmarks[1].1 - b.landmarks[0].1;
         assert!((tilt_a - tilt_b).abs() > 0.01, "roll animates over time");
         Ok(())
     }

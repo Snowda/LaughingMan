@@ -1,12 +1,12 @@
-//! One Euro filter (Casiez et al., CHI 2012): a speed-adaptive low-pass — cutoff rises with speed
-//! (`min_cutoff + beta·|ẋ|`), killing rest jitter without lagging fast motion. Smooths landmarks/box.
+//! One Euro filter (Casiez et al., CHI 2012), a low-pass that adapts to speed. The cutoff is
+//! `min_cutoff + beta·|ẋ|`. It removes jitter at rest and adds little lag to fast motion.
 
 use std::f32::consts::PI;
 
 // Cutoff (Hz) of the low-pass applied to the derivative estimate.
 const DEFAULT_D_CUTOFF: f32 = 1.0;
-// Guards against a zero/negative timestep.
-const MIN_DT: f32 = 1.0e-4;
+/// The smallest timestep (seconds) the filters accept. It stops a zero or negative `dt`.
+pub const MIN_DT: f32 = 1.0e-4;
 
 /// A scalar One Euro filter.
 pub struct OneEuro {
@@ -29,29 +29,29 @@ impl OneEuro {
         }
     }
 
-    /// Filters `x` observed `dt` seconds after the previous sample; the first passes through.
+    /// Filters `x`, seen `dt` seconds after the previous sample. The first sample passes through.
     pub fn filter(&mut self, x: f32, dt: f32) -> f32 {
         let Some(xp) = self.x_prev else {
             self.x_prev = Some(x);
             return x;
         };
-        let dt = dt.max(MIN_DT);
+        let dt: f32 = dt.max(MIN_DT);
         // Low-pass the derivative, then set the cutoff from its magnitude.
-        let dx = (x - xp) / dt;
-        let a_d = alpha(self.d_cutoff, dt);
-        let edx = a_d * dx + (1.0 - a_d) * self.dx_prev;
+        let dx: f32 = (x - xp) / dt;
+        let a_d: f32 = alpha(self.d_cutoff, dt);
+        let edx: f32 = a_d * dx + (1.0 - a_d) * self.dx_prev;
         self.dx_prev = edx;
-        let cutoff = self.min_cutoff + self.beta * edx.abs();
-        let a = alpha(cutoff, dt);
-        let xf = a * x + (1.0 - a) * xp;
+        let cutoff: f32 = self.min_cutoff + self.beta * edx.abs();
+        let a: f32 = alpha(cutoff, dt);
+        let xf: f32 = a * x + (1.0 - a) * xp;
         self.x_prev = Some(xf);
         xf
     }
 }
 
-// The exponential-smoothing factor for a first-order low-pass at `cutoff` Hz over `dt` seconds.
+// The exponential factor of a first-order low-pass at `cutoff` Hz over `dt` seconds.
 fn alpha(cutoff: f32, dt: f32) -> f32 {
-    let tau = 1.0 / (2.0 * PI * cutoff);
+    let tau: f32 = 1.0 / (2.0 * PI * cutoff);
     1.0 / (1.0 + tau / dt)
 }
 
@@ -78,36 +78,36 @@ impl OneEuroPoint {
 #[cfg(test)]
 mod tests {
     use super::OneEuro;
-    use crate::num::Cast as _;
+    use crate::num::usize_to_f32;
 
     const DT: f32 = 1.0 / 30.0;
 
     fn variance(xs: &[f32]) -> f32 {
-        let n = xs.len().to_f32();
-        let mean = xs.iter().sum::<f32>() / n;
+        let n: f32 = usize_to_f32(xs.len());
+        let mean: f32 = xs.iter().sum::<f32>() / n;
         xs.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n
     }
 
     #[test]
     fn suppresses_jitter_on_a_static_signal() {
         // Static 100 ±10 jitter: filtered variance (post-warmup) is far below the input's.
-        let mut f = OneEuro::new(1.0, 0.0);
-        let inputs: Vec<f32> = (0..60).map(|i| if i % 2 == 0 { 110.0 } else { 90.0 }).collect();
-        let outputs: Vec<f32> = inputs.iter().map(|&x| f.filter(x, DT)).collect();
-        let in_var = variance(&inputs[30..]);
-        let out_var = variance(&outputs[30..]);
+        let mut f: OneEuro = OneEuro::new(1.0, 0.0);
+        let inputs: [f32; 60] = std::array::from_fn(|i| if i % 2 == 0 { 110.0 } else { 90.0 });
+        let outputs: [f32; 60] = inputs.map(|x| f.filter(x, DT));
+        let in_var: f32 = variance(&inputs[30..]);
+        let out_var: f32 = variance(&outputs[30..]);
         assert!(out_var < in_var * 0.25, "in={in_var} out={out_var}");
     }
 
     #[test]
     fn tracks_a_ramp_with_little_lag_unlike_a_fixed_lowpass() {
-        // Constant-velocity ramp: One Euro (beta>0) tracks with small lag; a fixed low-pass lags far more.
-        let v = 300.0; // px/s
-        let mut euro = OneEuro::new(1.0, 0.5);
-        let mut fixed = OneEuro::new(1.0, 0.0);
+        // A ramp at constant velocity. One Euro (beta>0) has a small lag. A fixed low-pass lags far more.
+        let v: f32 = 300.0; // px/s
+        let mut euro: OneEuro = OneEuro::new(1.0, 0.5);
+        let mut fixed: OneEuro = OneEuro::new(1.0, 0.0);
         let (mut euro_err, mut fixed_err) = (0.0, 0.0);
-        for i in 0..120 {
-            let x = v * i.to_f32() * DT;
+        for i in 0..120u16 {
+            let x: f32 = v * f32::from(i) * DT;
             euro_err = (x - euro.filter(x, DT)).abs();
             fixed_err = (x - fixed.filter(x, DT)).abs();
         }
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn first_sample_passes_through() {
-        let mut f = OneEuro::new(1.0, 0.5);
-        assert_eq!(f.filter(42.0, DT), 42.0);
+        let mut f: OneEuro = OneEuro::new(1.0, 0.5);
+        assert_eq!(f.filter(42.0, DT).to_bits(), 42.0f32.to_bits());
     }
 }

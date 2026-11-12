@@ -14,7 +14,8 @@ pub struct Frame {
 }
 
 pub trait FrameSource {
-    fn next_frame(&mut self) -> anyhow::Result<Frame>;
+    /// The newest frame, borrowed until the next call.
+    fn next_frame(&mut self) -> crate::error::Result<&Frame>;
 
     fn dimensions(&self) -> (u32, u32);
 }

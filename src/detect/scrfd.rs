@@ -1,44 +1,45 @@
-//! SCRFD post-processing (pure): letterbox preprocess, per-stride anchor decode (`distance2bbox`/
-//! `distance2kps`), map back to image space. Dependency-free and unit-tested; the ONNX session is in [`super::session`].
+//! Pure SCRFD pre- and post-process: letterbox, anchor decode per stride, and the map back to the image.
+//! The ONNX session is in [`super::session`].
 
 use crate::detect::nms::nms;
 use crate::detect::{Bbox, Detection, Landmarks};
-use crate::num::Cast as _;
+use crate::num::{float_to_int, u32_to_f32, u32_to_usize, usize_to_f32};
 
 pub const INPUT_SIZE: usize = 640;
-// The three feature-map strides SCRFD emits (coarse→fine reversed, matching output ordering).
+// The three feature-map strides of SCRFD, in the order of its outputs.
 pub const STRIDES: [usize; 3] = [8, 16, 32];
 pub const NUM_ANCHORS: usize = 2; // Anchors per feature-map location.
-pub const SCORE_THRESHOLD: f32 = 0.5; // Default NMS IoU threshold.
-pub const NMS_THRESHOLD: f32 = 0.4; // Default NMS IoU threshold.
+pub const SCORE_THRESHOLD: f32 = 0.5; // The presenter lowers this to the low band of the tracker.
+pub const NMS_THRESHOLD: f32 = 0.4;
 
-// Pixel normalization: (v - MEAN) / STD, matching InsightFace's blob (mean 127.5, scale 1/128).
+// Pixel normalization (v - MEAN) / STD, the same as the InsightFace blob.
 const MEAN: f32 = 127.5;
 const STD: f32 = 128.0;
 
-/// The uniform resize factor mapping the source into a `target`-square letterbox (top-left, aspect preserved).
+/// The uniform scale that fits the source into a `target` square letterbox at the top left.
 #[must_use]
 pub fn letterbox_scale(width: u32, height: u32, target: usize) -> f32 {
-    let t = target.to_f32();
-    (t / width.to_f32()).min(t / height.to_f32())
+    let t: f32 = usize_to_f32(target);
+    (t / u32_to_f32(width)).min(t / u32_to_f32(height))
 }
 
-/// Nearest-neighbor letterbox of an RGB8 frame into a normalized planar-RGB (NCHW) `3*target*target` tensor; pad = normalized zero.
+/// Nearest-neighbor letterbox of an RGB8 frame into a normalized NCHW tensor of `3*target*target`.
+/// The pad is the normalized zero.
 #[must_use]
 pub fn preprocess(rgb: &[u8], width: u32, height: u32, target: usize) -> Vec<f32> {
-    let scale = letterbox_scale(width, height, target);
-    let new_w = (width.to_f32() * scale).round().to_usize();
-    let new_h = (height.to_f32() * scale).round().to_usize();
-    let plane = target * target;
-    let pad = (0.0 - MEAN) / STD;
-    let mut out = vec![pad; 3 * plane];
-    let (w, h) = (width.to_usize(), height.to_usize());
+    let scale: f32 = letterbox_scale(width, height, target);
+    let new_w: usize = float_to_int((u32_to_f32(width) * scale).round());
+    let new_h: usize = float_to_int((u32_to_f32(height) * scale).round());
+    let plane: usize = target * target;
+    let pad: f32 = (0.0 - MEAN) / STD;
+    let mut out: Vec<f32> = vec![pad; 3 * plane];
+    let (w, h) = (u32_to_usize(width), u32_to_usize(height));
     for oy in 0..new_h.min(target) {
-        let sy = (oy.to_f32() / scale).to_usize().min(h - 1);
+        let sy: usize = float_to_int::<usize>(usize_to_f32(oy) / scale).min(h - 1);
         for ox in 0..new_w.min(target) {
-            let sx = (ox.to_f32() / scale).to_usize().min(w - 1);
-            let src = (sy * w + sx) * 3;
-            let dst = oy * target + ox;
+            let sx: usize = float_to_int::<usize>(usize_to_f32(ox) / scale).min(w - 1);
+            let src: usize = (sy * w + sx) * 3;
+            let dst: usize = oy * target + ox;
             out[dst] = (f32::from(rgb[src]) - MEAN) / STD;
             out[plane + dst] = (f32::from(rgb[src + 1]) - MEAN) / STD;
             out[2 * plane + dst] = (f32::from(rgb[src + 2]) - MEAN) / STD;
@@ -68,52 +69,34 @@ pub fn distance2kps(cx: f32, cy: f32, d: &[f32; 10]) -> Landmarks {
     lm
 }
 
-/// Decodes one stride's raw outputs (letterboxed input space): anchor centers `(col*stride, row*stride)`
-/// row-major, `num_anchors` innermost, preds ×stride. Keeps anchors scoring ≥ `score_threshold`.
-#[must_use]
-pub fn decode_stride(
-    raw: StrideOutputs,
+/// Decodes the raw outputs of one stride in letterbox space. Anchor centers are `(col*stride, row*stride)`.
+/// The order is row-major with `num_anchors` innermost. Keeps anchors with a score ≥ `score_threshold`.
+pub fn decode_stride<'a>(
+    raw: StrideOutputs<'a>,
     stride: usize,
     num_anchors: usize,
     score_threshold: f32,
-) -> Vec<Detection> {
+) -> impl Iterator<Item = Detection> + 'a {
     let (scores, bbox, kps, feat_w, feat_h) = raw;
-    let stride_f = stride.to_f32();
-    let mut out = Vec::new();
-    let mut idx = 0;
-    for row in 0..feat_h {
-        for col in 0..feat_w {
-            for _ in 0..num_anchors {
-                let score = scores[idx];
-                if score >= score_threshold {
-                    let (cx, cy) = (col.to_f32() * stride_f, row.to_f32() * stride_f);
-                    let d = [
-                        bbox[idx * 4] * stride_f,
-                        bbox[idx * 4 + 1] * stride_f,
-                        bbox[idx * 4 + 2] * stride_f,
-                        bbox[idx * 4 + 3] * stride_f,
-                    ];
-                    let mut kd = [0.0f32; 10];
-                    for (k, slot) in kd.iter_mut().enumerate() {
-                        *slot = kps[idx * 10 + k] * stride_f;
-                    }
-                    out.push(Detection {
-                        bbox: distance2bbox(cx, cy, d),
-                        score,
-                        landmarks: distance2kps(cx, cy, &kd),
-                    });
-                }
-                idx += 1;
-            }
-        }
-    }
-    out
+    let stride_f: f32 = usize_to_f32(stride);
+    scores
+        .iter()
+        .take(feat_w * feat_h * num_anchors)
+        .enumerate()
+        .filter(move |&(_, &score)| score >= score_threshold)
+        .map(move |(idx, &score)| {
+            let cell: usize = idx / num_anchors;
+            let (cx, cy) = (usize_to_f32(cell % feat_w) * stride_f, usize_to_f32(cell / feat_w) * stride_f);
+            let d: [f32; 4] = std::array::from_fn(|k| bbox[idx * 4 + k] * stride_f);
+            let kd: [f32; 10] = std::array::from_fn(|k| kps[idx * 10 + k] * stride_f);
+            Detection { bbox: distance2bbox(cx, cy, d), score, landmarks: distance2kps(cx, cy, &kd) }
+        })
 }
 
-/// Maps a detection from letterboxed input space back to original pixels (divide by scale; no offset).
+/// Maps a detection from letterbox space back to source pixels. It divides by the scale, with no offset.
 #[must_use]
 pub fn rescale(mut det: Detection, scale: f32) -> Detection {
-    let inv = 1.0 / scale;
+    let inv: f32 = 1.0 / scale;
     det.bbox = Bbox {
         x1: det.bbox.x1 * inv,
         y1: det.bbox.y1 * inv,
@@ -129,22 +112,23 @@ pub fn rescale(mut det: Detection, scale: f32) -> Detection {
 /// One stride's raw network outputs: `(scores, bbox_preds, kps_preds, feat_w, feat_h)`.
 pub type StrideOutputs<'a> = (&'a [f32], &'a [f32], &'a [f32], usize, usize);
 
-/// Assembles original-image-space detections from every stride: decode each, NMS across all, rescale. `per_stride[i]` ↔ `STRIDES[i]`.
+/// Decodes all strides, applies NMS, and rescales to source pixels. `per_stride[i]` ↔ `STRIDES[i]`.
 #[must_use]
 pub fn assemble(
-    per_stride: &[StrideOutputs],
+    per_stride: &[StrideOutputs; STRIDES.len()],
     scale: f32,
     score_threshold: f32,
     nms_threshold: f32,
 ) -> Vec<Detection> {
-    let mut all = Vec::new();
-    for (i, &raw) in per_stride.iter().enumerate() {
-        all.extend(decode_stride(raw, STRIDES[i], NUM_ANCHORS, score_threshold));
-    }
-    nms(all, nms_threshold)
-        .into_iter()
-        .map(|det| rescale(det, scale))
-        .collect()
+    let mut all: Vec<Detection> = per_stride
+        .iter()
+        .zip(STRIDES)
+        .flat_map(|(&raw, stride)| decode_stride(raw, stride, NUM_ANCHORS, score_threshold))
+        .collect();
+    let kept: usize = nms(&mut all, nms_threshold);
+    all.truncate(kept);
+    all.iter_mut().for_each(|det| *det = rescale(*det, scale));
+    all
 }
 
 #[cfg(test)]
@@ -157,14 +141,14 @@ mod tests {
 
     #[test]
     fn distance2bbox_offsets_from_center() {
-        let b = distance2bbox(100.0, 100.0, [10.0, 20.0, 30.0, 40.0]);
+        let b: Bbox = distance2bbox(100.0, 100.0, [10.0, 20.0, 30.0, 40.0]);
         assert_eq!(b, Bbox { x1: 90.0, y1: 80.0, x2: 130.0, y2: 140.0 });
     }
 
     #[test]
     fn distance2kps_adds_offsets_to_center() {
-        let d = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        let lm = distance2kps(100.0, 200.0, &d);
+        let d: [f32; 10] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let lm: [(f32, f32); 5] = distance2kps(100.0, 200.0, &d);
         assert_eq!(lm[0], (101.0, 202.0));
         assert_eq!(lm[2], (105.0, 206.0));
         assert_eq!(lm[4], (109.0, 210.0));
@@ -172,44 +156,61 @@ mod tests {
 
     #[test]
     fn decode_stride_single_anchor_hand_computed() {
-        // 1x1 map, stride 8, one anchor at center (0,0). bbox preds [1,1,1,1]*8 = 8 each →
-        // box (-8,-8,8,8). Score above threshold → kept.
-        let scores = [0.9];
-        let bbox = [1.0, 1.0, 1.0, 1.0];
-        let kps = [0.0; 10];
-        let dets = decode_stride((&scores, &bbox, &kps, 1, 1), 8, 1, 0.5);
-        assert_eq!(dets.len(), 1);
-        assert_eq!(dets[0].bbox, Bbox { x1: -8.0, y1: -8.0, x2: 8.0, y2: 8.0 });
+        // 1x1 map, stride 8, one anchor at (0,0). Preds [1,1,1,1]*8 give box (-8,-8,8,8). The score passes.
+        let scores: [f32; 1] = [0.9];
+        let bbox: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+        let kps: [f32; 10] = [0.0; 10];
+        let mut dets = decode_stride((&scores, &bbox, &kps, 1, 1), 8, 1, 0.5);
+        assert_eq!(dets.next().map(|d| d.bbox), Some(Bbox { x1: -8.0, y1: -8.0, x2: 8.0, y2: 8.0 }));
+        assert!(dets.next().is_none(), "exactly one anchor decoded");
     }
 
     #[test]
     fn decode_stride_drops_below_threshold() {
-        let dets = decode_stride((&[0.3], &[1.0; 4], &[0.0; 10], 1, 1), 8, 1, 0.5);
-        assert!(dets.is_empty());
+        assert!(
+            decode_stride((&[0.3], &[1.0; 4], &[0.0; 10], 1, 1), 8, 1, 0.5).next().is_none(),
+            "below-threshold anchor dropped"
+        );
     }
 
     #[test]
     fn decode_stride_anchor_centers_follow_col_row() {
-        // 2x2 map, stride 10, one anchor. All scores pass; boxes have zero distance so each box is a
-        // point at the anchor center (col*10, row*10).
-        let scores = [1.0; 4];
-        let bbox = [0.0; 16];
-        let kps = [0.0; 40];
-        let dets = decode_stride((&scores, &bbox, &kps, 2, 2), 10, 1, 0.5);
-        let centers: Vec<(f32, f32)> = dets.iter().map(|d| (d.bbox.x1, d.bbox.y1)).collect();
-        // Row-major: (0,0),(10,0),(0,10),(10,10).
-        assert_eq!(centers, vec![(0.0, 0.0), (10.0, 0.0), (0.0, 10.0), (10.0, 10.0)]);
+        // 2x2 map, stride 10, one anchor. All scores pass. Each box is a point at (col*10, row*10).
+        let scores: [f32; 4] = [1.0; 4];
+        let bbox: [f32; 16] = [0.0; 16];
+        let kps: [f32; 40] = [0.0; 40];
+        assert!(
+            decode_stride((&scores, &bbox, &kps, 2, 2), 10, 1, 0.5)
+                .map(|d| (d.bbox.x1, d.bbox.y1))
+                .eq([(0.0, 0.0), (10.0, 0.0), (0.0, 10.0), (10.0, 10.0)]),
+            "anchor centers are row-major (col*10, row*10)"
+        );
+    }
+
+    #[test]
+    fn decode_stride_rows_follow_feat_w_on_a_wide_map() {
+        let mut scores: [f32; 12] = [0.0; 12];
+        scores[9] = 0.9;
+        assert!(
+            decode_stride((&scores, &[0.0; 48], &[0.0; 120], 3, 2), 10, 2, 0.5)
+                .map(|d| (d.bbox.x1, d.bbox.y1))
+                .eq([(10.0, 10.0)]),
+            "3x2 map, 2 anchors: anchor 9 is cell 4 = (col 1, row 1)"
+        );
     }
 
     #[test]
     fn decode_stride_two_anchors_share_a_center() {
         // 1x1 map, 2 anchors: both at center (0,0), distinct scores, both kept.
-        let scores = [0.9, 0.8];
-        let bbox = [0.0; 8];
-        let kps = [0.0; 20];
-        let dets = decode_stride((&scores, &bbox, &kps, 1, 1), 8, 2, 0.5);
-        assert_eq!(dets.len(), 2);
-        assert!(dets.iter().all(|d| d.bbox.x1 == 0.0 && d.bbox.y1 == 0.0));
+        let scores: [f32; 2] = [0.9, 0.8];
+        let bbox: [f32; 8] = [0.0; 8];
+        let kps: [f32; 20] = [0.0; 20];
+        assert!(
+            decode_stride((&scores, &bbox, &kps, 1, 1), 8, 2, 0.5)
+                .map(|d| d.bbox.x1 == 0.0 && d.bbox.y1 == 0.0)
+                .eq([true, true]),
+            "both anchors kept, both at the cell center"
+        );
     }
 
     #[test]
@@ -222,12 +223,12 @@ mod tests {
 
     #[test]
     fn rescale_divides_out_the_letterbox_scale() {
-        let det = Detection {
+        let det: Detection = Detection {
             bbox: Bbox { x1: 50.0, y1: 50.0, x2: 100.0, y2: 100.0 },
             score: 0.9,
             landmarks: [(60.0, 60.0); 5],
         };
-        let back = rescale(det, 0.5);
+        let back: Detection = rescale(det, 0.5);
         assert_eq!(back.bbox, Bbox { x1: 100.0, y1: 100.0, x2: 200.0, y2: 200.0 });
         assert_eq!(back.landmarks[0], (120.0, 120.0));
     }
@@ -235,27 +236,28 @@ mod tests {
     #[test]
     fn preprocess_produces_normalized_nchw() {
         // 2x1 RGB image: a white and a black pixel. Target 4 for a small deterministic buffer.
-        let rgb = [255, 255, 255, 0, 0, 0];
-        let out = preprocess(&rgb, 2, 1, 4);
+        let rgb: [u8; 6] = [255, 255, 255, 0, 0, 0];
+        let out: Vec<f32> = preprocess(&rgb, 2, 1, 4);
         assert_eq!(out.len(), 3 * 4 * 4);
         // Top-left maps to the source's first (white) pixel: (255-127.5)/128 ≈ 0.996.
         assert!((out[0] - (255.0 - 127.5) / 128.0).abs() < 1e-6);
         // The pad region carries the normalized zero pixel.
-        let last = out.len() - 1;
+        let last: usize = out.len() - 1;
         assert!((out[last] - (0.0 - 127.5) / 128.0).abs() < 1e-6);
     }
 
     #[test]
     fn assemble_merges_strides_nms_and_rescales() {
-        // Strides 8 and 16, each 1x1 with 2 anchors: anchor 0 decodes to the same box on both, anchor 1
-        // is below threshold. NMS collapses the duplicates to 0.9, then rescale(0.5) doubles to ±16.
-        let s8 = ([0.9f32, 0.1], [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0], [0.0f32; 20]);
-        let s16 = ([0.85f32, 0.1], [0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0], [0.0f32; 20]);
-        let per_stride: Vec<super::StrideOutputs> = vec![
+        // Strides 8 and 16, each 1x1 with 2 anchors. Anchor 0 gives the same box on both. Anchor 1 fails.
+        // NMS keeps the 0.9 box. Then rescale(0.5) doubles it to ±16.
+        let s8: ([f32; 2], [f32; 8], [f32; 20]) = ([0.9f32, 0.1], [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0], [0.0f32; 20]);
+        let s16: ([f32; 2], [f32; 8], [f32; 20]) = ([0.85f32, 0.1], [0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0], [0.0f32; 20]);
+        let per_stride: [super::StrideOutputs; 3] = [
             (&s8.0, &s8.1, &s8.2, 1, 1),
             (&s16.0, &s16.1, &s16.2, 1, 1),
+            (&[], &[], &[], 0, 0),
         ];
-        let dets = assemble(&per_stride, 0.5, 0.5, 0.4);
+        let dets: Vec<Detection> = assemble(&per_stride, 0.5, 0.5, 0.4);
         assert_eq!(dets.len(), 1, "NMS collapses the duplicate box");
         assert!((dets[0].score - 0.9).abs() < 1e-6);
         assert_eq!(dets[0].bbox, Bbox { x1: -16.0, y1: -16.0, x2: 16.0, y2: 16.0 });
