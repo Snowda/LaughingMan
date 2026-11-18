@@ -7,13 +7,13 @@ let
     url = "https://github.com/NixOS/nixpkgs/archive/02c087f3fe673c9e317f206a627cb6b910336dbe.tar.gz";
     sha256 = "1l60ar0j7j7jrrg4r7j4kscrih0qn2n0lslffzflhv86lyq650r2";
   };
-  # rust-overlay gives the exact rustc that Cargo.toml's rust-version and the Containerfile's rust:1.99.1 pin.
+  # rust-overlay gives the exact rustc that Cargo.toml's rust-version and the Containerfile's rust:1.100.0 pin.
   rustOverlay = fetchTarball {
-    url = "https://github.com/oxalica/rust-overlay/archive/83dd732f2428827f35d997deae108a2ced5125f4.tar.gz";
-    sha256 = "14wicypn8mavj1bzwdmvi82gvga7p554hxlvyd45lfyia363xcws";
+    url = "https://github.com/oxalica/rust-overlay/archive/8bbfc858c7b85f5e6ed6d6cc201ffcee1bb08a9b.tar.gz";
+    sha256 = "0dk7kbba29zgdn1ydsr59ipfbn1rjwljcs73cclg0zwl2rninv1n";
   };
   pkgs = import nixpkgs { overlays = [ (import rustOverlay) ]; };
-  rust = pkgs.rust-bin.stable."1.99.1".default.override {
+  rust = pkgs.rust-bin.stable."1.100.0".default.override {
     extensions = [ "rustfmt" "clippy" ];
   };
   # Runtime libraries: ash and winit dlopen these, so they go on LD_LIBRARY_PATH (and the image's rpath).
